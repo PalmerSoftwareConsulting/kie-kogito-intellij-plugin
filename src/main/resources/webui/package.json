@@ -1,0 +1,15 @@
+{
+  "name": "plugin-webui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@kie-tools/kie-editors-standalone": "^10.1.0",
+    "@kie-tools/dmn-editor-standalone": "^10.1.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.12"
+  }
+}
