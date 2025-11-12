@@ -2,4 +2,4 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
-rootProject.name = "kogito-intellij-plugin"
+rootProject.name = "kie-kogito-intellij-plugin"

@@ -95,14 +95,14 @@ java -version
 
 1. **Clone and build the plugin:**
    ```bash
-   git clone https://github.com/PalmerSoftwareConsulting/kogito-intellij-plugin.git
-   cd kogito-intellij-plugin
+   git clone https://github.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin.git
+   cd kie-kogito-intellij-plugin
    ./gradlew buildPlugin
    ```
 
 2. **Install in IntelliJ:**
    - **Settings** → **Plugins** → **⚙️ (gear icon)** → **Install Plugin from Disk...**
-   - Select: `build/distributions/kogito-intellij-plugin-*.zip`
+   - Select: `build/distributions/kie-kogito-intellij-plugin-*.zip`
    - Click **OK** and restart IntelliJ
 
 3. **Test it out:**
@@ -126,8 +126,8 @@ When you open your first BPMN/DMN file:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/PalmerSoftwareConsulting/kogito-intellij-plugin.git
-   cd kogito-intellij-plugin
+   git clone https://github.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin.git
+   cd kie-kogito-intellij-plugin
    ```
 
 2. Build the plugin:
@@ -137,7 +137,7 @@ When you open your first BPMN/DMN file:
 
 3. Install in IntelliJ IDEA:
    - Go to **Settings** → **Plugins** → **⚙️** → **Install Plugin from Disk...**
-   - Select `build/distributions/kogito-intellij-plugin-*.zip`
+   - Select `build/distributions/kie-kogito-intellij-plugin-*.zip`
 
 ### From JetBrains Marketplace (Coming Soon)
 
@@ -303,7 +303,7 @@ Once published, you'll be able to install directly from the IDE:
 
 # Build distribution ZIP
 ./gradlew buildPlugin
-# Output: build/distributions/kogito-intellij-plugin-*.zip
+# Output: build/distributions/kie-kogito-intellij-plugin-*.zip
 ```
 
 ### Development Tips
@@ -318,7 +318,7 @@ Once published, you'll be able to install directly from the IDE:
 ## Project Structure
 
 ```
-kogito-intellij-plugin/
+kie-kogito-intellij-plugin/
 ├── src/main/
 │   ├── kotlin/com/github/palmersoftwareconsulting/kogitointellijplugin/
 │   │   ├── editor/
@@ -455,7 +455,7 @@ If all else fails:
 
 ## Support
 
-- **Issues**: Report bugs at [GitHub Issues](https://github.com/PalmerSoftwareConsulting/kogito-intellij-plugin/issues)
+- **Issues**: Report bugs at [GitHub Issues](https://github.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/issues)
 - **Frontend Source**: See `src/main/resources/webui/` for TypeScript/Vite frontend
 
 ---
