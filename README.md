@@ -8,11 +8,11 @@ The Kogito IntelliJ Plugin brings powerful visual editing capabilities for Busin
 **Key Features:**
 - Visual BPMN 2.0 editor with full modeling capabilities
 - DMN 1.2+ decision table and expression editor
-- Real-time content synchronization
+- Real-time content synchronization via JCEF bridge
 - File modification tracking
-- Automatic server lifecycle management
+- Direct browser integration (no external server required)
 - Support for large files (up to 10MB)
-- Robust error handling and reconnection logic
+- Robust error handling and graceful degradation
 
 **Supported File Types:**
 - `.bpmn` and `.bpmn2` - BPMN process diagrams
@@ -252,31 +252,27 @@ Once published, you'll be able to install directly from the IDE:
 
 ### Critical Fixes (Oct 2025)
 
-1. **Race Condition in Server Initialization**
-   - Added `@Volatile` disposal flag to prevent race conditions
-   - Proper synchronization of server lifecycle methods
-   - Safe coroutine cancellation on dispose
-
-2. **Resource Leak Prevention**
+1. **Resource Leak Prevention**
    - Cleanup handler for failed editor initialization
-   - Proper WebSocket disconnection on errors
-   - Temporary variable tracking for resource cleanup
+   - Proper JCEF browser disposal on errors
+   - Proper JavaScript bridge disposal
+   - Thread-safe browser reference management
 
-3. **Thread Safety**
+2. **Thread Safety**
    - `AtomicBoolean` for isModified flag
    - `CopyOnWriteArrayList` for property listeners
+   - `AtomicReference` for thread-safe browser access
    - Synchronized access to shared state
 
-4. **Improved Error Handling**
-   - WebSocket reconnection with exponential backoff (1s, 2s, 4s, 8s, 16s)
-   - Connection state tracking (DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, FAILED)
-   - Graceful degradation on connection loss
+3. **Async Communication Pattern**
+   - CompletableFuture-based request-response over one-way JCEF bridge
+   - Proper handling of async save operations
+   - Bridge message routing with type-based dispatch
 
-5. **Input Validation**
-   - Required field validation in server.js
-   - Type checking for all parameters
-   - UUID format validation
-   - Command validation with whitelist approach
+4. **Input Validation**
+   - Content validation for BPMN/DMN XML
+   - Base64 encoding to handle special characters safely
+   - Message type validation in bridge handler
 
 ## Building from Source
 
