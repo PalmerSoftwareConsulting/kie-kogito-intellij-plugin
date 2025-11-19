@@ -159,6 +159,64 @@ window.setInitialContent = (content: string) => {
 console.log("[Kogito] Waiting for initial content before creating editor...");
 
 /**
+ * Builds the resources Map from window.editorResources.
+ *
+ * The Kotlin side injects `window.editorResources` as a JavaScript object
+ * containing Base64-encoded resource contents:
+ * ```javascript
+ * {
+ *   "path/to/model.dmn": "BASE64_CONTENT",
+ *   "path/to/tasks.wid": "BASE64_CONTENT"
+ * }
+ * ```
+ *
+ * This function converts it to the format expected by Kogito editors:
+ * ```javascript
+ * Map([
+ *   ["path/to/model.dmn", {contentType: "text", content: Promise.resolve("DECODED_CONTENT")}],
+ *   ["path/to/tasks.wid", {contentType: "text", content: Promise.resolve("DECODED_CONTENT")}]
+ * ])
+ * ```
+ *
+ * ## Resource Types
+ * - DMN Editor: Uses DMN files as included models
+ * - BPMN Editor: Uses .wid files as Work Item Definitions
+ *
+ * @returns Map of resources in the format expected by Kogito editors
+ */
+function buildResourcesMap(): Map<string, { contentType: "text" | "binary"; content: Promise<string> }> {
+    const resourcesMap = new Map<string, { contentType: "text" | "binary"; content: Promise<string> }>();
+
+    // Check if window.editorResources exists
+    if (!window.editorResources || typeof window.editorResources !== "object") {
+        console.log("[Kogito] No editor resources found");
+        return resourcesMap;
+    }
+
+    console.log("[Kogito] Building resources map from", Object.keys(window.editorResources).length, "resources");
+
+    // Convert each Base64-encoded resource to the proper format
+    for (const [path, base64Content] of Object.entries(window.editorResources)) {
+        try {
+            // Decode Base64 content
+            const decodedContent = atob(base64Content);
+            console.log("[Kogito] Decoded resource:", path, "length:", decodedContent.length);
+
+            // Add to map with proper format
+            resourcesMap.set(path, {
+                contentType: "text",
+                content: Promise.resolve(decodedContent)
+            });
+        } catch (e) {
+            console.error("[Kogito] Failed to decode resource:", path, e);
+        }
+    }
+
+    console.log("[Kogito] ✅ Built resources map with", resourcesMap.size, "entries");
+    return resourcesMap;
+}
+
+/**
  * Notifies the IDE when editor content changes (dirty state).
  *
  * This callback is registered with both DMN and BPMN editors via
@@ -214,7 +272,7 @@ if (editorType === "dmn") {
      * - readOnly: Whether editing is disabled
      * - origin: Origin for postMessage communication
      * - onError: Error handler for editor initialization errors
-     * - resources: Map of additional resources (currently empty)
+     * - resources: Map of DMN files that can be used as included models
      *
      * The editor is an iframe-based component that communicates via postMessage.
      */
@@ -228,7 +286,7 @@ if (editorType === "dmn") {
             console.error("[Kogito] ❌ DMN ERROR:", e);
             alert("DMN Editor Error: " + JSON.stringify(e));
         },
-        resources: new Map(),
+        resources: buildResourcesMap(),
     });
     console.log("[Kogito] DMN editor created:", dmn);
 
@@ -304,8 +362,9 @@ if (editorType === "dmn") {
     /**
      * BPMN editor instance created by BpmnEditor.open().
      *
-     * Configuration similar to DMN editor but with BPMN-specific features.
-     * The resourceContentHandler allows loading additional BPMN resources.
+     * Configuration similar to DMN editor but with BPMN-specific features:
+     * - resources: Map of .wid (Work Item Definition) files for custom tasks
+     * - resourceContentHandler: Fallback handler for dynamically requested resources
      */
     const bpmn = BpmnEditor.open({
         container: document.getElementById("bpmn-editor-container")!,
@@ -316,7 +375,7 @@ if (editorType === "dmn") {
             console.error("[Kogito] ❌ BPMN ERROR:", e);
             alert("BPMN Editor Error: " + JSON.stringify(e));
         },
-        resources: new Map(),
+        resources: buildResourcesMap(),
         resourceContentHandler,
     });
     console.log("[Kogito] BPMN editor created:", bpmn);

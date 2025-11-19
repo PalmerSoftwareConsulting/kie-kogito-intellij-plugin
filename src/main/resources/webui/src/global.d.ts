@@ -196,5 +196,45 @@ declare global {
          * @see AppAPI
          */
         app?: AppAPI;
+
+        /**
+         * Resources for the Kogito editor, provided by Kotlin.
+         *
+         * Injected by Kotlin code during HTML generation in KogitoEditor.buildEditorHtml().
+         * Contains Base64-encoded file contents mapped by relative POSIX paths.
+         *
+         * ## Content by Editor Type
+         * - **DMN Editor**: Contains all DMN files in the project for use as included models
+         * - **BPMN Editor**: Contains all .wid (Work Item Definition) files for custom tasks
+         *
+         * ## Format
+         * ```typescript
+         * {
+         *   "path/to/model.dmn": "BASE64_ENCODED_CONTENT",
+         *   "path/to/tasks.wid": "BASE64_ENCODED_CONTENT"
+         * }
+         * ```
+         *
+         * ## Path Format
+         * Paths are relative to the project base directory and normalized to POSIX format:
+         * - No leading slash
+         * - Forward slashes (/) as separators (even on Windows)
+         * - For DMN: Excludes the current file being edited
+         *
+         * ## Usage
+         * JavaScript code should decode the Base64 content using `atob()` and
+         * convert to the format expected by Kogito editors via `buildResourcesMap()`.
+         *
+         * ## Important Note (DMN)
+         * From Kogito documentation: "Resources located in a parent directory
+         * (in relation to the current content path) won't be listed to be used
+         * as an Included Model."
+         *
+         * The filtering is handled by the Kogito editor itself based on path relationships.
+         *
+         * @see buildResourcesMap
+         * @see KogitoEditor.discoverResources
+         */
+        editorResources?: Record<string, string>;
     }
 }

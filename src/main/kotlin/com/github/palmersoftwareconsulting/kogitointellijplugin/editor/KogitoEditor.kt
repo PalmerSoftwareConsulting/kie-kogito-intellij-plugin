@@ -11,7 +11,10 @@ import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.IdeFocusManager
+import com.intellij.psi.search.FileTypeIndex
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefBrowserBase
@@ -171,16 +174,6 @@ class KogitoEditor(
      */
     init {
         logger.warn("KogitoEditor INIT started for ${editorType.displayName}, file: ${file.path}")
-
-        // Show notification
-        NotificationGroupManager.getInstance()
-            .getNotificationGroup("Kogito Editor")
-            .createNotification(
-                "Kogito Editor",
-                "Initializing ${editorType.displayName} for ${file.name}",
-                NotificationType.INFORMATION
-            )
-            .notify(project)
 
         val loading = JLabel("<html><center>Loading ${editorType.displayName}...</center></html>")
         loading.horizontalAlignment = SwingConstants.CENTER
@@ -406,6 +399,9 @@ class KogitoEditor(
     private fun buildEditorHtml(): String {
         logger.warn("🔨 Building HTML for ${editorType.typeName} editor")
 
+        // Discover resources (DMN included models or BPMN Work Item Definitions)
+        val resourcesJson = discoverResources()
+
         // Load the bundled JavaScript
         val jsContent = try {
             logger.warn("📦 Loading JavaScript bundle from resources...")
@@ -478,6 +474,9 @@ class KogitoEditor(
                     console.log('[Kogito] ReadOnly: ${!file.isWritable}');
                     console.log('========================================');
 
+                    // Inject editor resources (DMN included models or BPMN WID files)
+                    window.editorResources = $resourcesJson;
+                    console.log('[Kogito] Editor resources injected:', Object.keys(window.editorResources).length, 'files');
 
                     // Set query parameters for editor initialization
                     const params = new URLSearchParams();
@@ -512,6 +511,167 @@ class KogitoEditor(
 
         logger.warn("📄 HTML built successfully, total size: ${html.length} bytes")
         return html
+    }
+
+    /**
+     * Discovers resource files for the Kogito editor based on editor type.
+     *
+     * This method finds and encodes resources needed by the Kogito editors:
+     * - **DMN Editor**: Discovers all DMN files in the project for included models
+     * - **BPMN Editor**: Discovers all .wid (Work Item Definition) files for custom tasks
+     *
+     * ## DMN Included Models
+     * DMN files can reference other DMN files as included models. The editor needs access
+     * to these files to provide autocomplete and validation for included decision services.
+     *
+     * Important: "Resources located in a parent directory (in relation to the current content path)
+     * won't be listed to be used as an Included Model." (Kogito documentation)
+     *
+     * ## BPMN Work Item Definitions
+     * WID files define custom service tasks that can be used in BPMN diagrams. They specify
+     * task properties, icons, and default names using MVEL language.
+     *
+     * ## Path Calculation
+     * Paths are calculated relative to the project base directory and normalized to POSIX format:
+     * - Backslashes converted to forward slashes (Windows compatibility)
+     * - Relative to project base path
+     * - For DMN: Excludes the current file being edited
+     *
+     * ## Resource Format
+     * Returns a JavaScript object literal that can be embedded in the HTML:
+     * ```javascript
+     * {
+     *   "path/to/model1.dmn": "BASE64_ENCODED_CONTENT",
+     *   "path/to/custom-tasks.wid": "BASE64_ENCODED_CONTENT"
+     * }
+     * ```
+     *
+     * ## Performance Considerations
+     * - Uses FileTypeIndex for DMN files (indexed search)
+     * - Uses VFS traversal for WID files (file extension search)
+     * - Reads all file contents into memory (may impact performance with many large files)
+     * - Base64 encoding increases size by ~33%
+     *
+     * @return JavaScript object literal string with resources, or "{}" if none found
+     * @see FileTypeIndex
+     */
+    private fun discoverResources(): String {
+        try {
+            val projectBasePath = project.basePath ?: return "{}"
+            val resourcesMap = mutableMapOf<String, String>()
+
+            when (editorType) {
+                EditorType.DMN -> {
+                    logger.warn("🔍 Discovering DMN files in project for included models...")
+
+                    // Find all DMN files in the project
+                    val dmnFileType = com.github.palmersoftwareconsulting.kogitointellijplugin.filetypes.DmnFileType
+                    val scope = GlobalSearchScope.projectScope(project)
+                    val dmnFiles = FileTypeIndex.getFiles(dmnFileType, scope)
+
+                    logger.warn("Found ${dmnFiles.size} DMN files in project")
+
+                    val currentFilePath = file.path
+
+                    for (virtualFile in dmnFiles) {
+                        // Skip the current file being edited
+                        if (virtualFile.path == currentFilePath) {
+                            continue
+                        }
+
+                        try {
+                            // Calculate relative POSIX path
+                            val relativePath = virtualFile.path
+                                .removePrefix(projectBasePath)
+                                .removePrefix("/")
+                                .replace("\\", "/")
+
+                            // Read and encode content
+                            val content = String(virtualFile.contentsToByteArray(), Charsets.UTF_8)
+                            val base64Content = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
+
+                            resourcesMap[relativePath] = base64Content
+                            logger.info("Added DMN resource: $relativePath (${content.length} chars)")
+                        } catch (e: Exception) {
+                            logger.warn("Failed to read DMN file ${virtualFile.path}", e)
+                        }
+                    }
+
+                    if (resourcesMap.isEmpty()) {
+                        logger.warn("No DMN resources found (excluding current file)")
+                    } else {
+                        logger.warn("✅ Found ${resourcesMap.size} DMN files for included models")
+                    }
+                }
+
+                EditorType.BPMN -> {
+                    logger.warn("🔍 Discovering WID files in project for custom tasks...")
+
+                    // Find all .wid files in the project using VFS
+                    val projectBaseDir = project.baseDir ?: return "{}"
+                    val widFiles = mutableListOf<VirtualFile>()
+
+                    // Recursively search for .wid files
+                    fun searchForWidFiles(dir: VirtualFile) {
+                        for (child in dir.children) {
+                            if (child.isDirectory) {
+                                searchForWidFiles(child)
+                            } else if (child.extension?.lowercase() == "wid") {
+                                widFiles.add(child)
+                            }
+                        }
+                    }
+
+                    searchForWidFiles(projectBaseDir)
+                    logger.warn("Found ${widFiles.size} WID files in project")
+
+                    for (virtualFile in widFiles) {
+                        try {
+                            // Calculate relative POSIX path
+                            val relativePath = virtualFile.path
+                                .removePrefix(projectBasePath)
+                                .removePrefix("/")
+                                .replace("\\", "/")
+
+                            // Read and encode content
+                            val content = String(virtualFile.contentsToByteArray(), Charsets.UTF_8)
+                            val base64Content = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
+
+                            resourcesMap[relativePath] = base64Content
+                            logger.info("Added WID resource: $relativePath (${content.length} chars)")
+                        } catch (e: Exception) {
+                            logger.warn("Failed to read WID file ${virtualFile.path}", e)
+                        }
+                    }
+
+                    if (resourcesMap.isEmpty()) {
+                        logger.warn("No WID resources found")
+                    } else {
+                        logger.warn("✅ Found ${resourcesMap.size} WID files for custom tasks")
+                    }
+                }
+            }
+
+            // Generate JavaScript object literal
+            if (resourcesMap.isEmpty()) {
+                return "{}"
+            }
+
+            // Sort entries alphabetically by path for consistent ordering in UI
+            val jsObject = resourcesMap.entries
+                .sortedBy { it.key }
+                .joinToString(",\n") { (path, content) ->
+                    // Escape the path for JavaScript string literal
+                    val escapedPath = path.replace("\\", "\\\\").replace("\"", "\\\"")
+                    "\"$escapedPath\": \"$content\""
+                }
+
+            return "{\n$jsObject\n}"
+
+        } catch (e: Exception) {
+            logger.error("Failed to discover resources", e)
+            return "{}"
+        }
     }
 
     /**
@@ -1029,7 +1189,6 @@ class KogitoEditor(
                     file.setBinaryContent(xml.toByteArray(Charsets.UTF_8))
                 }
                 setModified(false)
-                notifyInfo("File Saved", "${file.name} saved successfully")
                 future.complete(true)
 
                 // Call markAsSaved() to reset editor state and fire content change callbacks
