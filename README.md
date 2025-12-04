@@ -8,11 +8,11 @@ The Kogito IntelliJ Plugin brings powerful visual editing capabilities for Busin
 **Key Features:**
 - Visual BPMN 2.0 editor with full modeling capabilities
 - DMN 1.2+ decision table and expression editor
-- Real-time content synchronization via JCEF bridge
+- Real-time content synchronization
 - File modification tracking
-- Direct browser integration (no external server required)
+- Automatic server lifecycle management
 - Support for large files (up to 10MB)
-- Robust error handling and graceful degradation
+- Robust error handling and reconnection logic
 
 **Supported File Types:**
 - `.bpmn` and `.bpmn2` - BPMN process diagrams
@@ -61,7 +61,7 @@ The plugin uses **direct JCEF integration** with bundled JavaScript editors:
 
 **Key Components:**
 - **KogitoEditor**: FileEditor implementation with embedded JCEF browser
-- **Vite-bundled Frontend**: TypeScript/JavaScript compiled to single bundle (~25MB)
+- **Vite-bundled Frontend**: TypeScript/JavaScript compiled to single bundle (~30MB)
 - **JBCefJSQuery**: Bidirectional bridge between Kotlin and JavaScript
 - **Kogito Standalone Editors**: @kie-tools/dmn-editor-standalone and @kie-tools/kie-editors-standalone
 - **KogitoSaveListener**: Integrates Cmd+S/Ctrl+S with IntelliJ's save action
@@ -217,9 +217,37 @@ Once published, you'll be able to install directly from the IDE:
 
 ## Recent Improvements
 
-### Code Cleanup (Nov 2025)
+### Type Safety & Build Modernization (Dec 2025)
 
-**Removed ~440 lines of unused/debug code:**
+**TypeScript Improvements:**
+- Added comprehensive type definitions in `global.d.ts`
+- Discriminated union types for bridge messages (`JsToKotlinMessage`, `KotlinToJsMessage`)
+- Type-safe `toIde()` function signature
+- Request/response correlation with `requestId` pattern
+- Fixed UTF-8 handling in Base64 decoding using `TextDecoder`
+- Strict TypeScript configuration (`tsconfig.json`)
+
+**Build Updates:**
+- Updated to Vite 7.x and TypeScript 5.9.x
+- Modern ES2020 target with bundler module resolution
+
+**Critical Bug Fix:**
+- Fixed EDT deadlock that caused infinite loading wheel when pressing Cmd+S/Ctrl+S to save
+- Root cause: `CompletableFuture.thenAccept()` callback ran on JCEF thread, but `WriteCommandAction` needs EDT
+- Solution: Wrapped write operation in `ApplicationManager.invokeLater{}` to schedule on EDT without blocking
+
+### Code Cleanup (Dec 2025)
+
+**Kotlin Improvements:**
+- Centralized `EditorType` enum with file extension handling
+- Added `ReadAction` wrapper for thread-safe VFS operations
+- Exception-safe `dispose()` with try-finally pattern
+- Gson-based type-safe JSON parsing with proper error handling
+- `CompletableFuture` timeouts to prevent hanging operations
+- Normalized logging levels (debug vs warn vs error)
+- Removed emojis from production log messages
+
+**TypeScript Cleanup (~440 lines removed):**
 - Unused functions: `buildEditorHtmlWithDataUrl()`, `loadFileContent()`
 - Debug inspection code blocks (~100 lines)
 - CSS injection for drag-and-drop (no longer needed with OSR disabled)
@@ -229,9 +257,9 @@ Once published, you'll be able to install directly from the IDE:
 
 **Impact:**
 - Cleaner, more maintainable codebase
-- Reduced main.ts from ~383 to ~160 lines (58% reduction)
-- Removed dead code paths
 - Production-ready code quality
+- Type-safe bridge communication
+- Modern build tooling
 
 ### Documentation & Code Quality (Oct 2025)
 
@@ -252,27 +280,31 @@ Once published, you'll be able to install directly from the IDE:
 
 ### Critical Fixes (Oct 2025)
 
-1. **Resource Leak Prevention**
-   - Cleanup handler for failed editor initialization
-   - Proper JCEF browser disposal on errors
-   - Proper JavaScript bridge disposal
-   - Thread-safe browser reference management
+1. **Race Condition in Server Initialization**
+   - Added `@Volatile` disposal flag to prevent race conditions
+   - Proper synchronization of server lifecycle methods
+   - Safe coroutine cancellation on dispose
 
-2. **Thread Safety**
+2. **Resource Leak Prevention**
+   - Cleanup handler for failed editor initialization
+   - Proper WebSocket disconnection on errors
+   - Temporary variable tracking for resource cleanup
+
+3. **Thread Safety**
    - `AtomicBoolean` for isModified flag
    - `CopyOnWriteArrayList` for property listeners
-   - `AtomicReference` for thread-safe browser access
    - Synchronized access to shared state
 
-3. **Async Communication Pattern**
-   - CompletableFuture-based request-response over one-way JCEF bridge
-   - Proper handling of async save operations
-   - Bridge message routing with type-based dispatch
+4. **Improved Error Handling**
+   - WebSocket reconnection with exponential backoff (1s, 2s, 4s, 8s, 16s)
+   - Connection state tracking (DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, FAILED)
+   - Graceful degradation on connection loss
 
-4. **Input Validation**
-   - Content validation for BPMN/DMN XML
-   - Base64 encoding to handle special characters safely
-   - Message type validation in bridge handler
+5. **Input Validation**
+   - Required field validation in server.js
+   - Type checking for all parameters
+   - UUID format validation
+   - Command validation with whitelist approach
 
 ## Building from Source
 
@@ -280,7 +312,7 @@ Once published, you'll be able to install directly from the IDE:
 
 - JDK 21 or later
 - Gradle 9.0+ (wrapper included)
-- Node.js 14.x or later (only for rebuilding webui frontend, optional)
+- Node.js 20.19+ or 22.12+ (only for rebuilding webui frontend, optional - required for Vite 7)
 
 ### Build Commands
 
@@ -306,7 +338,7 @@ Once published, you'll be able to install directly from the IDE:
 
 1. **Browser DevTools**: Uncomment `browser.openDevtools()` in KogitoEditor.kt:148 for debugging
 2. **Frontend Build**: Run `cd src/main/resources/webui && npm run build` to rebuild JavaScript bundle
-3. **Bundle Size**: Built JavaScript is ~25MB (includes full DMN/BPMN editors from @kie-tools)
+3. **Bundle Size**: Built JavaScript is ~30MB (includes full DMN/BPMN editors from @kie-tools)
 4. **Hot Reload**: Use `./gradlew runIde` for iterative development
 5. **Bridge Logging**: Check IntelliJ Event Log for JS ↔ Kotlin communication messages
 6. **JCEF Support**: Verify with Help → About → JetBrains Runtime (should show "JCEF")
@@ -331,10 +363,11 @@ kie-kogito-intellij-plugin/
 │       └── webui/                            # Frontend source
 │           ├── src/
 │           │   ├── main.ts                  # Editor initialization
-│           │   ├── global.d.ts              # TypeScript declarations
+│           │   ├── global.d.ts              # TypeScript type definitions
 │           │   └── index.html               # HTML template
-│           ├── dist/assets/index.js         # Bundled output (~25MB)
-│           ├── package.json                 # npm dependencies
+│           ├── dist/assets/index.js         # Bundled output (~30MB)
+│           ├── package.json                 # npm dependencies (Vite 7, TS 5.9)
+│           ├── tsconfig.json                # Strict TypeScript config
 │           └── vite.config.js               # Vite build config
 ├── build.gradle.kts                          # Gradle build script
 └── gradle.properties                         # Plugin properties
@@ -350,16 +383,20 @@ kie-kogito-intellij-plugin/
 └── No services      - Direct integration (no server)
 
 📁 TypeScript Frontend (webui/)
-└── main.ts          - Kogito editor initialization & bridge API
+├── main.ts          - Kogito editor initialization & bridge API
+├── global.d.ts      - Type definitions for bridge messages
+└── tsconfig.json    - Strict TypeScript configuration
 ```
 
 ### Best Practices Implemented
 
-- **Thread-Safety**: `AtomicBoolean`, `CopyOnWriteArrayList` for concurrent access
-- **Resource Management**: Proper JCEF browser disposal, cleanup on errors
-- **Error Resilience**: Graceful error handling with user notifications
+- **Thread-Safety**: `AtomicBoolean`, `AtomicReference`, `CopyOnWriteArrayList` for concurrent access
+- **Resource Management**: Proper JCEF browser disposal, exception-safe cleanup in `dispose()`
+- **Error Resilience**: Graceful error handling with user notifications, `CompletableFuture` timeouts
+- **Type Safety**: Discriminated union types for bridge messages, strict TypeScript configuration
 - **JCEF Integration**: OSR disabled for drag-and-drop, context menu disabled
-- **Performance**: Lazy browser initialization, Base64 encoding for content transfer
+- **EDT Threading**: `invokeLater` pattern for save operations to avoid JCEF/EDT deadlocks
+- **Performance**: Lazy browser initialization, Base64 encoding with proper UTF-8 handling
 
 ## Acknowledgments
 

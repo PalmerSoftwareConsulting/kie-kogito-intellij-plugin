@@ -26,6 +26,13 @@
 
 import * as DmnEditor from "@kie-tools/dmn-editor-standalone/dist";
 import * as BpmnEditor from "@kie-tools/kie-editors-standalone/dist/bpmn";
+import type { JsToKotlinMessage } from "./global";
+
+// ============================================================================
+// Logging & Initialization
+// ============================================================================
+
+console.log("[Kogito] Editor script loaded");
 
 /**
  * Origin for postMessage communication with Kogito editor envelope.
@@ -33,10 +40,6 @@ import * as BpmnEditor from "@kie-tools/kie-editors-standalone/dist/bpmn";
  * Kogito editors use iframes and require cross-origin message passing.
  */
 const ORIGIN = "*";
-
-console.log("[Kogito] Window location:", window.location.href);
-console.log("[Kogito] Window origin:", window.location.origin);
-console.log("[Kogito] Using origin:", ORIGIN);
 
 /**
  * Sends a message to the IntelliJ plugin via the JCEF bridge.
@@ -65,8 +68,9 @@ console.log("[Kogito] Using origin:", ORIGIN);
  *
  * @param payload The message payload to send (will be JSON-stringified)
  * @see window.sendToIde
+ * @see JsToKotlinMessage
  */
-function toIde(payload: unknown) {
+function toIde(payload: JsToKotlinMessage) {
     if (typeof window.sendToIde === "function") {
         try {
             window.sendToIde(JSON.stringify(payload));
@@ -93,10 +97,11 @@ const params = new URLSearchParams(window.location.search);
 const editorType = params.get("type") || "bpmn";
 
 /**
- * Name of the file being edited.
- * Used for display in the editor and for file path normalization.
+ * Path of the file relative to workspace root.
+ * Used by Kogito to determine which resources are in parent directories.
+ * Example: "kogito/poc-medicaid-rules/src/main/resources/aca-subsidy-rules.dmn"
  */
-const fileName = params.get("file") || "Untitled";
+const filePathFromRoot = params.get("file") || "Untitled";
 
 /**
  * Whether the editor should be read-only.
@@ -120,10 +125,9 @@ const readOnly = params.get("readonly") === "true";
  *
  * @see window.setInitialContent
  */
-let resolveInitialContent: (content: string) => void;
+let resolveInitialContent: ((content: string) => void) | null = null;
 const initialContent = new Promise<string>((resolve) => {
     resolveInitialContent = resolve;
-    console.log("[Kogito] Initial content promise created, waiting for content...");
 });
 
 /**
@@ -150,13 +154,13 @@ const initialContent = new Promise<string>((resolve) => {
  * @see initialContent
  */
 window.setInitialContent = (content: string) => {
-    console.log("[Kogito] ✅ setInitialContent called with", content.length, "characters");
-    console.log("[Kogito] Content preview:", content.substring(0, 200));
-    resolveInitialContent(content);
-    console.log("[Kogito] Initial content promise resolved!");
+    if (resolveInitialContent) {
+        resolveInitialContent(content);
+        resolveInitialContent = null; // Clear after use to prevent double-resolution
+    } else {
+        console.warn("[Kogito] setInitialContent called but resolver is null (already resolved?)");
+    }
 };
-
-console.log("[Kogito] Waiting for initial content before creating editor...");
 
 /**
  * Builds the resources Map from window.editorResources.
@@ -189,18 +193,17 @@ function buildResourcesMap(): Map<string, { contentType: "text" | "binary"; cont
 
     // Check if window.editorResources exists
     if (!window.editorResources || typeof window.editorResources !== "object") {
-        console.log("[Kogito] No editor resources found");
         return resourcesMap;
     }
-
-    console.log("[Kogito] Building resources map from", Object.keys(window.editorResources).length, "resources");
 
     // Convert each Base64-encoded resource to the proper format
     for (const [path, base64Content] of Object.entries(window.editorResources)) {
         try {
-            // Decode Base64 content
-            const decodedContent = atob(base64Content);
-            console.log("[Kogito] Decoded resource:", path, "length:", decodedContent.length);
+            // Decode Base64 content with proper UTF-8 handling
+            // atob() alone doesn't handle multi-byte UTF-8 characters correctly
+            const binaryString = atob(base64Content);
+            const bytes = Uint8Array.from(binaryString, char => char.charCodeAt(0));
+            const decodedContent = new TextDecoder("utf-8").decode(bytes);
 
             // Add to map with proper format
             resourcesMap.set(path, {
@@ -212,7 +215,6 @@ function buildResourcesMap(): Map<string, { contentType: "text" | "binary"; cont
         }
     }
 
-    console.log("[Kogito] ✅ Built resources map with", resourcesMap.size, "entries");
     return resourcesMap;
 }
 
@@ -240,11 +242,7 @@ const notifyDirty = (dirty: boolean) =>
 // Editor Initialization
 // ============================================================================
 
-console.log("[Kogito] ========== CREATING EDITOR ==========");
-console.log("[Kogito] Editor type:", editorType);
-console.log("[Kogito] File name:", fileName);
-console.log("[Kogito] Read only:", readOnly);
-console.log("[Kogito] Origin:", ORIGIN);
+console.log("[Kogito] Initializing", editorType.toUpperCase(), "editor for:", filePathFromRoot);
 
 /**
  * DMN Editor Initialization
@@ -253,14 +251,14 @@ console.log("[Kogito] Origin:", ORIGIN);
  * using Kogito's standalone DMN editor package.
  */
 if (editorType === "dmn") {
-    console.log("[Kogito] Opening DMN editor...");
-    console.log("[Kogito] initialContent is a Promise:", initialContent instanceof Promise);
+    // Get DOM elements with null checks
+    const dmnContainer = document.getElementById("dmn-editor-container");
+    const bpmnContainer = document.getElementById("bpmn-editor-container");
 
-    // Log when the promise resolves
-    initialContent.then((content) => {
-        console.log("[Kogito] 🎉 initialContent promise resolved! Content length:", content.length);
-        console.log("[Kogito] Content starts with:", content.substring(0, 100));
-    });
+    if (!dmnContainer) {
+        console.error("[Kogito] FATAL: dmn-editor-container not found in DOM");
+        throw new Error("dmn-editor-container element not found");
+    }
 
     /**
      * DMN editor instance created by DmnEditor.open().
@@ -268,27 +266,30 @@ if (editorType === "dmn") {
      * Configuration:
      * - container: DOM element to render the editor in
      * - initialContent: Promise<string> that resolves with file content
-     * - initialFileNormalizedPosixPathRelativeToTheWorkspaceRoot: File name for display
+     * - initialFileNormalizedPosixPathRelativeToTheWorkspaceRoot: Path from workspace root
      * - readOnly: Whether editing is disabled
      * - origin: Origin for postMessage communication
      * - onError: Error handler for editor initialization errors
-     * - resources: Map of DMN files that can be used as included models
+     * - resources: Map of DMN/PMML files that can be used as included models
+     *
+     * NOTE: The @kie-tools/dmn-editor-standalone v10.1.0 does NOT support
+     * onRequestExternalModelsAvailableToInclude or onRequestExternalModelByPath callbacks.
+     * All resources must be provided upfront via the resources Map.
      *
      * The editor is an iframe-based component that communicates via postMessage.
      */
     const dmn = DmnEditor.open({
-        container: document.getElementById("dmn-editor-container")!,
+        container: dmnContainer,
         initialContent,
-        initialFileNormalizedPosixPathRelativeToTheWorkspaceRoot: fileName,
+        initialFileNormalizedPosixPathRelativeToTheWorkspaceRoot: filePathFromRoot,
         readOnly,
         origin: ORIGIN,
         onError: (e) => {
-            console.error("[Kogito] ❌ DMN ERROR:", e);
+            console.error("[Kogito] DMN ERROR:", e);
             alert("DMN Editor Error: " + JSON.stringify(e));
         },
         resources: buildResourcesMap(),
     });
-    console.log("[Kogito] DMN editor created:", dmn);
 
     // Subscribe to content changes to track dirty state
     dmn.subscribeToContentChanges(notifyDirty);
@@ -322,12 +323,8 @@ if (editorType === "dmn") {
     };
 
     // Show only DMN container
-    const dmnContainer = document.getElementById("dmn-editor-container")!;
-    const bpmnContainer = document.getElementById("bpmn-editor-container")!;
     dmnContainer.classList.add("visible");
-    bpmnContainer.classList.remove("visible");
-    console.log("[Kogito] DMN container display:", window.getComputedStyle(dmnContainer).display);
-    console.log("[Kogito] DMN container dimensions:", dmnContainer.offsetWidth, "x", dmnContainer.offsetHeight);
+    bpmnContainer?.classList.remove("visible");
 
 /**
  * BPMN Editor Initialization
@@ -336,7 +333,14 @@ if (editorType === "dmn") {
  * using Kogito's standalone BPMN editor package.
  */
 } else {
-    console.log("[Kogito] Opening BPMN editor...");
+    // Get DOM elements with null checks
+    const dmnContainer = document.getElementById("dmn-editor-container");
+    const bpmnContainer = document.getElementById("bpmn-editor-container");
+
+    if (!bpmnContainer) {
+        console.error("[Kogito] FATAL: bpmn-editor-container not found in DOM");
+        throw new Error("bpmn-editor-container element not found");
+    }
 
     /**
      * Resource content handler for BPMN editor.
@@ -354,7 +358,6 @@ if (editorType === "dmn") {
      * @returns Promise resolving to resource content (empty for now)
      */
     const resourceContentHandler = (path: string) => {
-        console.log("[Kogito] Resource requested:", path);
         // Return empty promise for missing resources to suppress errors
         return Promise.resolve({ content: "", path });
     };
@@ -367,18 +370,17 @@ if (editorType === "dmn") {
      * - resourceContentHandler: Fallback handler for dynamically requested resources
      */
     const bpmn = BpmnEditor.open({
-        container: document.getElementById("bpmn-editor-container")!,
+        container: bpmnContainer,
         initialContent,
         readOnly,
         origin: ORIGIN,
         onError: (e) => {
-            console.error("[Kogito] ❌ BPMN ERROR:", e);
+            console.error("[Kogito] BPMN ERROR:", e);
             alert("BPMN Editor Error: " + JSON.stringify(e));
         },
         resources: buildResourcesMap(),
         resourceContentHandler,
     });
-    console.log("[Kogito] BPMN editor created:", bpmn);
 
     // Subscribe to content changes to track dirty state
     bpmn.subscribeToContentChanges(notifyDirty);
@@ -403,17 +405,24 @@ if (editorType === "dmn") {
     };
 
     // Show only BPMN container
-    const dmnContainer = document.getElementById("dmn-editor-container")!;
-    const bpmnContainer = document.getElementById("bpmn-editor-container")!;
-    dmnContainer.classList.remove("visible");
+    dmnContainer?.classList.remove("visible");
     bpmnContainer.classList.add("visible");
-    console.log("[Kogito] BPMN container display:", window.getComputedStyle(bpmnContainer).display);
-    console.log("[Kogito] BPMN container dimensions:", bpmnContainer.offsetWidth, "x", bpmnContainer.offsetHeight);
 }
 
 // ============================================================================
 // Bridge Readiness Notification
 // ============================================================================
+
+/**
+ * Maximum time to wait for bridge availability (30 seconds).
+ * After this time, we give up and log an error.
+ */
+const BRIDGE_TIMEOUT_MS = 30000;
+
+/**
+ * Polling interval for bridge availability check (100ms).
+ */
+const BRIDGE_POLL_INTERVAL_MS = 100;
 
 /**
  * Notifies the IDE that the editor is fully initialized and ready.
@@ -430,23 +439,35 @@ if (editorType === "dmn") {
  *
  * Once both conditions are met, sends "editorReady" message to IDE.
  *
+ * ## Timeout
+ * If bridge is not available after 30 seconds, stops polling and logs an error.
+ * This prevents infinite polling in case of initialization failure.
+ *
  * ## Why Polling is Needed
  * JavaScript module execution and Kotlin's bridge injection happen asynchronously.
  * We cannot guarantee which completes first, so we poll until bridge is ready.
  *
+ * @param startTime The timestamp when polling started (for timeout calculation)
  * @see window.sendToIde
  * @see window.bridgeReady
  */
-function notifyEditorReady() {
+function notifyEditorReady(startTime: number = Date.now()) {
     if (typeof window.sendToIde === "function" && window.bridgeReady) {
         toIde({ type: "editorReady" });
-        console.log("[Kogito] ✅ Editor ready event sent to IDE");
+        console.log("[Kogito] Editor ready");
     } else {
-        console.log("[Kogito] ⏳ Waiting for sendToIde bridge... (sendToIde exists:", typeof window.sendToIde === "function", ", bridgeReady:", window.bridgeReady, ")");
-        setTimeout(notifyEditorReady, 100);
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= BRIDGE_TIMEOUT_MS) {
+            console.error(
+                "[Kogito] Bridge not available after",
+                BRIDGE_TIMEOUT_MS / 1000,
+                "seconds. Editor may not function correctly."
+            );
+            return; // Give up after timeout
+        }
+        setTimeout(() => notifyEditorReady(startTime), BRIDGE_POLL_INTERVAL_MS);
     }
 }
 
 // Start polling for bridge availability
-console.log("[Kogito] 🔄 Starting bridge polling...");
 notifyEditorReady();

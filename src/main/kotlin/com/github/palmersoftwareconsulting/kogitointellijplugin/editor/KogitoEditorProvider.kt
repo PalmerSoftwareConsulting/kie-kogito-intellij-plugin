@@ -28,9 +28,6 @@ class KogitoEditorProvider : FileEditorProvider, DumbAware {
 
         /** Unique identifier for the Kogito editor type. */
         const val EDITOR_TYPE_ID = "kogito-editor"
-
-        /** Set of file extensions this provider handles. */
-        private val SUPPORTED_EXTENSIONS = setOf("bpmn", "bpmn2", "dmn")
     }
 
     /**
@@ -41,22 +38,7 @@ class KogitoEditorProvider : FileEditorProvider, DumbAware {
      * @return true if the file has a supported extension (.bpmn, .bpmn2, .dmn), false otherwise
      */
     override fun accept(project: Project, file: VirtualFile): Boolean {
-        val accepted = file.extension?.lowercase() in SUPPORTED_EXTENSIONS
-        logger.warn("KogitoEditorProvider.accept() called for file: ${file.path}, extension: ${file.extension}, accepted: $accepted")
-
-        // Show notification for debugging
-        if (accepted) {
-            com.intellij.notification.NotificationGroupManager.getInstance()
-                .getNotificationGroup("Kogito Editor")
-                .createNotification(
-                    "Kogito Editor",
-                    "Opening ${file.name} with Kogito editor",
-                    com.intellij.notification.NotificationType.INFORMATION
-                )
-                .notify(project)
-        }
-
-        return accepted
+        return EditorType.isSupported(file)
     }
 
     /**
@@ -72,11 +54,8 @@ class KogitoEditorProvider : FileEditorProvider, DumbAware {
      */
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
         logger.info("KogitoEditorProvider.createEditor() called for file: ${file.path}")
-        val editorType = when (file.extension?.lowercase()) {
-            "dmn" -> EditorType.DMN
-            "bpmn", "bpmn2" -> EditorType.BPMN
-            else -> throw IllegalArgumentException("Unsupported file type: ${file.extension}")
-        }
+        val editorType = EditorType.fromFile(file)
+            ?: throw IllegalArgumentException("Unsupported file type: ${file.extension}")
 
         logger.info("Creating KogitoEditor with type: $editorType")
         return KogitoEditor(project, file, editorType)
@@ -97,18 +76,4 @@ class KogitoEditorProvider : FileEditorProvider, DumbAware {
      * @return FileEditorPolicy.HIDE_DEFAULT_EDITOR
      */
     override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.HIDE_DEFAULT_EDITOR
-}
-
-/**
- * Enum representing the types of Kogito editors available.
- *
- * @property typeName The type name used in URLs and server communication
- * @property displayName The human-readable display name for the editor
- */
-enum class EditorType(val typeName: String, val displayName: String) {
-    /** Business Process Model and Notation editor. */
-    BPMN("bpmn", "BPMN Editor"),
-
-    /** Decision Model and Notation editor. */
-    DMN("dmn", "DMN Editor")
 }

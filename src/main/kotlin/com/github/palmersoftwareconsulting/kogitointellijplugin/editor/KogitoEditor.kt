@@ -3,6 +3,7 @@ package com.github.palmersoftwareconsulting.kogitointellijplugin.editor
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditor
@@ -13,8 +14,6 @@ import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.IdeFocusManager
-import com.intellij.psi.search.FileTypeIndex
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefBrowserBase
@@ -24,14 +23,20 @@ import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.CefLoadHandlerAdapter
 import org.cef.handler.CefContextMenuHandlerAdapter
+import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefKeyboardHandler
 import org.cef.handler.CefKeyboardHandlerAdapter
+import org.cef.CefSettings
 import org.cef.misc.BoolRef
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import java.awt.BorderLayout
 import java.beans.PropertyChangeListener
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.JComponent
@@ -97,6 +102,21 @@ class KogitoEditor(
 
     companion object {
         private val logger = Logger.getInstance(KogitoEditor::class.java)
+
+        /** Timeout for save operations in seconds. */
+        private const val SAVE_TIMEOUT_SECONDS = 10L
+
+        /** Build directory names to exclude from resource discovery. */
+        private val BUILD_DIR_NAMES = setOf("target", "build", "out", "classes", "bin", ".gradle", "node_modules")
+
+        /** Extensions to include for BPMN editor resources. */
+        private val BPMN_RESOURCE_EXTENSIONS = setOf("wid", "dmn")
+
+        /** Extensions to include for DMN editor resources (included models). */
+        private val DMN_RESOURCE_EXTENSIONS = setOf("dmn", "pmml")
+
+        /** Maximum file size in bytes for resource files (10MB). */
+        private const val MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024L
     }
 
     /**
@@ -153,10 +173,28 @@ class KogitoEditor(
      *
      * This enables async request-response communication pattern over the one-way bridge.
      *
+     * Uses AtomicReference for thread-safe access from both the save thread and the
+     * JCEF message handler thread.
+     *
      * @see saveContent
      * @see handleJsMessage
      */
-    private var pendingSave: CompletableFuture<String>? = null
+    private val pendingSave = AtomicReference<CompletableFuture<String>?>(null)
+
+    /**
+     * Guard to prevent concurrent save operations.
+     *
+     * Save operations can be triggered from multiple sources:
+     * - [KogitoSaveListener] when user presses Cmd+S/Ctrl+S
+     * - CEF keyboard handler as backup
+     * - JavaScript editor via "saveRequested" message
+     *
+     * Without this guard, rapid successive save requests could overwrite [pendingSave]
+     * before the first save completes, causing the first save's future to hang until timeout.
+     *
+     * @see saveContent
+     */
+    private val saveInProgress = AtomicBoolean(false)
 
     /**
      * Initializes the editor component and begins browser creation.
@@ -173,7 +211,7 @@ class KogitoEditor(
      * @see createBrowserAndLoad
      */
     init {
-        logger.warn("KogitoEditor INIT started for ${editorType.displayName}, file: ${file.path}")
+        logger.info("KogitoEditor INIT started for ${editorType.displayName}, file: ${file.path}")
 
         val loading = JLabel("<html><center>Loading ${editorType.displayName}...</center></html>")
         loading.horizontalAlignment = SwingConstants.CENTER
@@ -181,7 +219,7 @@ class KogitoEditor(
         editorPanel.isFocusable = true
 
         ApplicationManager.getApplication().invokeLater {
-            logger.warn("About to call createBrowserAndLoad()")
+            logger.debug("About to call createBrowserAndLoad()")
             createBrowserAndLoad()
         }
     }
@@ -222,7 +260,7 @@ class KogitoEditor(
      * ## JCEF Quirks
      * - OSR disabled: Required for HTML5 drag-and-drop (JBR-7399 limitation)
      * - Keyboard shortcuts: Cmd+S intercepted at CEF level but IDE level takes precedence
-     * - DevTools: Disabled by default, can be enabled by uncommenting browser.openDevtools()
+     * - DevTools: Can be enabled for debugging by calling browser.openDevtools() in onLoadEnd
      *
      * @throws Exception if browser creation fails (caught and shown to user)
      * @see JBCefBrowserBuilder
@@ -231,7 +269,7 @@ class KogitoEditor(
      */
     private fun createBrowserAndLoad() {
         try {
-            logger.warn("Creating browser for ${editorType.displayName} editor, file: ${file.path}")
+            logger.debug("Creating browser for ${editorType.displayName} editor, file: ${file.path}")
 
             // Check if JCEF is supported
             if (!JBCefApp.isSupported()) {
@@ -240,17 +278,17 @@ class KogitoEditor(
                 return
             }
 
-            logger.warn("JCEF is supported, creating browser instance with OSR disabled for drag-and-drop")
+            logger.debug("JCEF is supported, creating browser instance with OSR disabled for drag-and-drop")
             // Disable OSR (Off-Screen Rendering) to enable drag-and-drop support
             // See: https://intellij-support.jetbrains.com/hc/en-us/community/posts/20066759270162
             val browser = JBCefBrowserBuilder()
                 .setOffScreenRendering(false)
                 .build()
             browserRef.set(browser)
-            logger.warn("Browser instance created successfully (OSR disabled)")
+            logger.debug("Browser instance created successfully (OSR disabled)")
 
             // Setup JS -> JVM bridge
-            logger.warn("Setting up JS->JVM bridge")
+            logger.debug("Setting up JS->JVM bridge")
             jsQueryFromJs = JBCefJSQuery.create(browser as JBCefBrowserBase).apply {
                 addHandler { payload ->
                     logger.info("Received message from JS: ${payload.take(100)}...")
@@ -261,7 +299,7 @@ class KogitoEditor(
 
             // Add context menu handler to disable right-click menu
             val client = browser.jbCefClient
-            logger.warn("Adding context menu handler to disable right-click menu")
+            logger.debug("Adding context menu handler to disable right-click menu")
             client.addContextMenuHandler(object : CefContextMenuHandlerAdapter() {
                 override fun onBeforeContextMenu(
                     browser: CefBrowser,
@@ -271,28 +309,58 @@ class KogitoEditor(
                 ) {
                     // Clear the context menu model to disable the menu
                     model.clear()
-                    logger.info("Context menu cleared (right-click disabled)")
+                }
+            }, browser.cefBrowser)
+
+            // Add display handler to capture console.log messages from JavaScript
+            logger.debug("Adding display handler to capture JavaScript console messages")
+            client.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+                override fun onConsoleMessage(
+                    cefBrowser: CefBrowser,
+                    level: CefSettings.LogSeverity,
+                    message: String,
+                    source: String,
+                    line: Int
+                ): Boolean {
+                    // Log JavaScript console messages to the IDE log
+                    val levelStr = when (level) {
+                        CefSettings.LogSeverity.LOGSEVERITY_VERBOSE -> "VERBOSE"
+                        CefSettings.LogSeverity.LOGSEVERITY_INFO -> "INFO"
+                        CefSettings.LogSeverity.LOGSEVERITY_WARNING -> "WARN"
+                        CefSettings.LogSeverity.LOGSEVERITY_ERROR -> "ERROR"
+                        CefSettings.LogSeverity.LOGSEVERITY_DISABLE -> "DISABLED"
+                        else -> "DEFAULT"
+                    }
+
+                    // Log with appropriate level and include source information
+                    val logMessage = "[JS Console][$levelStr] $message (${source}:${line})"
+                    when (level) {
+                        CefSettings.LogSeverity.LOGSEVERITY_ERROR -> logger.error(logMessage)
+                        CefSettings.LogSeverity.LOGSEVERITY_WARNING -> logger.warn(logMessage)
+                        else -> logger.info(logMessage)
+                    }
+
+                    // Return false to allow default handling (still show in DevTools if open)
+                    return false
                 }
             }, browser.cefBrowser)
 
             // Add load handler to inject bridge and initialize editor
-            logger.warn("Adding load handler")
+            logger.debug("Adding load handler")
             client.addLoadHandler(object : CefLoadHandlerAdapter() {
                 override fun onLoadStart(
                     cefBrowser: CefBrowser,
                     frame: CefFrame,
                     transitionType: org.cef.network.CefRequest.TransitionType
                 ) {
-                    logger.warn("Load started for frame: ${frame.url}")
+                    logger.debug("Load started for frame: ${frame.url}")
                 }
 
                 override fun onLoadEnd(cefBrowser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
-                    logger.warn("⚡ Load ended for frame: ${frame.url}, status: $httpStatusCode, isMain: ${frame.isMain}")
+                    logger.info("Load ended for frame: ${frame.url}, status: $httpStatusCode, isMain: ${frame.isMain}")
                     if (frame.isMain) {
-                        // DevTools auto-open disabled for cleaner experience
-                        // Uncomment the line below if you need to debug the browser content:
-                        // browser.openDevtools()
-                        logger.warn("🔧 Initializing editor...")
+                        // Console output is captured by CefDisplayHandler above and logged to IDE log
+                        logger.info("Initializing editor...")
                         initializeEditor(browser)
                     }
                 }
@@ -309,14 +377,14 @@ class KogitoEditor(
             }, browser.cefBrowser)
 
             // Replace loading label with browser
-            logger.warn("Replacing loading label with browser component")
+            logger.debug("Replacing loading label with browser component")
             editorPanel.removeAll()
             editorPanel.add(browser.component, BorderLayout.CENTER)
             editorPanel.revalidate()
             editorPanel.repaint()
 
             // Add keyboard handler for Cmd+S / Ctrl+S at the CEF level
-            logger.warn("Adding CefKeyboardHandler for Cmd+S / Ctrl+S")
+            logger.debug("Adding CefKeyboardHandler for Cmd+S / Ctrl+S")
             client.addKeyboardHandler(object : CefKeyboardHandlerAdapter() {
                 override fun onPreKeyEvent(
                     browser: CefBrowser,
@@ -341,17 +409,17 @@ class KogitoEditor(
                     return false // Let other events pass through
                 }
             }, browser.cefBrowser)
-            logger.warn("CefKeyboardHandler added successfully")
+            logger.debug("CefKeyboardHandler added successfully")
 
             // Load the bundled HTML with inline JavaScript
-            logger.warn("Building editor HTML...")
+            logger.debug("Building editor HTML...")
 
             // Load with inline JavaScript
             val html = buildEditorHtml()
-            logger.warn("HTML built successfully, size: ${html.length} bytes")
+            logger.debug("HTML built successfully, size: ${html.length} bytes")
 
             // Use http://jbcef/ as the base URL (JCEF-specific protocol)
-            logger.warn("Loading HTML into browser...")
+            logger.debug("Loading HTML into browser...")
             browser.loadHTML(html)
 
             // Focus
@@ -397,22 +465,34 @@ class KogitoEditor(
      * @see loadInitialFileContent
      */
     private fun buildEditorHtml(): String {
-        logger.warn("🔨 Building HTML for ${editorType.typeName} editor")
+        logger.debug("Building HTML for ${editorType.typeName} editor")
+
+        // Calculate file path relative to project root for Kogito
+        val projectBasePath = project.basePath ?: ""
+        val filePathFromRoot = if (projectBasePath.isNotEmpty() && file.path.startsWith(projectBasePath)) {
+            file.path
+                .removePrefix(projectBasePath)
+                .removePrefix("/")
+                .replace("\\", "/")  // Normalize to POSIX path separators
+        } else {
+            file.name  // Fallback to just filename if project path is not available
+        }
+        logger.debug("File path from root: $filePathFromRoot")
 
         // Discover resources (DMN included models or BPMN Work Item Definitions)
         val resourcesJson = discoverResources()
 
         // Load the bundled JavaScript
         val jsContent = try {
-            logger.warn("📦 Loading JavaScript bundle from resources...")
+            logger.debug("Loading JavaScript bundle from resources...")
             val stream = javaClass.classLoader.getResourceAsStream("webui/dist/assets/index.js")
                 ?: throw IllegalStateException("Resource stream was null - file not found")
 
             val content = stream.bufferedReader().use { it.readText() }
-            logger.warn("✅ JavaScript loaded successfully, size: ${content.length} bytes (${content.length / 1024 / 1024}MB)")
+            logger.debug("JavaScript loaded successfully, size: ${content.length} bytes (${content.length / 1024 / 1024}MB)")
             content
         } catch (e: Exception) {
-            logger.error("❌ Failed to load webui/dist/assets/index.js", e)
+            logger.error("Failed to load webui/dist/assets/index.js", e)
             throw IllegalStateException("Could not load webui/dist/assets/index.js: ${e.message}", e)
         }
 
@@ -471,6 +551,7 @@ class KogitoEditor(
                     console.log('[Kogito] HTML PAGE LOADED');
                     console.log('[Kogito] Editor type: ${editorType.typeName}');
                     console.log('[Kogito] File: ${file.name}');
+                    console.log('[Kogito] File path from root: $filePathFromRoot');
                     console.log('[Kogito] ReadOnly: ${!file.isWritable}');
                     console.log('========================================');
 
@@ -481,7 +562,7 @@ class KogitoEditor(
                     // Set query parameters for editor initialization
                     const params = new URLSearchParams();
                     params.set('type', '${editorType.typeName}');
-                    params.set('file', '${file.name}');
+                    params.set('file', '$filePathFromRoot');
                     params.set('readonly', '${!file.isWritable}');
                     window.history.replaceState({}, '', '?' + params.toString());
                     console.log('[Kogito] Query params set:', params.toString());
@@ -509,7 +590,7 @@ class KogitoEditor(
             </html>
         """.trimIndent()
 
-        logger.warn("📄 HTML built successfully, total size: ${html.length} bytes")
+        logger.debug("HTML built successfully, total size: ${html.length} bytes")
         return html
     }
 
@@ -547,109 +628,81 @@ class KogitoEditor(
      * ```
      *
      * ## Performance Considerations
-     * - Uses FileTypeIndex for DMN files (indexed search)
-     * - Uses VFS traversal for WID files (file extension search)
+     * - Uses VFS traversal for resource file discovery
      * - Reads all file contents into memory (may impact performance with many large files)
      * - Base64 encoding increases size by ~33%
      *
      * @return JavaScript object literal string with resources, or "{}" if none found
-     * @see FileTypeIndex
      */
     private fun discoverResources(): String {
         try {
             val projectBasePath = project.basePath ?: return "{}"
+            val projectBaseDir = VirtualFileManager.getInstance().findFileByUrl("file://$projectBasePath") ?: return "{}"
+
+            // Select extensions based on editor type
+            val extensions = when (editorType) {
+                EditorType.DMN -> DMN_RESOURCE_EXTENSIONS
+                EditorType.BPMN -> BPMN_RESOURCE_EXTENSIONS
+            }
+
+            logger.info("Discovering ${editorType.displayName} resources (${extensions.joinToString(", ").uppercase()} files)...")
+
+            // Find all resource files in the project using VFS
+            val resourceFiles = findResourceFiles(projectBaseDir, extensions)
+
+            // Count files by extension for logging
+            val extCounts = extensions.associateWith { ext ->
+                resourceFiles.count { it.extension?.lowercase() == ext }
+            }
+            val countsStr = extCounts.entries.joinToString(", ") { "${it.value} ${it.key.uppercase()}" }
+            logger.info("Found ${resourceFiles.size} resource files ($countsStr)")
+
+            // Build resources map
             val resourcesMap = mutableMapOf<String, String>()
 
-            when (editorType) {
-                EditorType.DMN -> {
-                    logger.warn("🔍 Discovering DMN files in project for included models...")
-
-                    // Find all DMN files in the project
-                    val dmnFileType = com.github.palmersoftwareconsulting.kogitointellijplugin.filetypes.DmnFileType
-                    val scope = GlobalSearchScope.projectScope(project)
-                    val dmnFiles = FileTypeIndex.getFiles(dmnFileType, scope)
-
-                    logger.warn("Found ${dmnFiles.size} DMN files in project")
-
-                    val currentFilePath = file.path
-
-                    for (virtualFile in dmnFiles) {
-                        // Skip the current file being edited
-                        if (virtualFile.path == currentFilePath) {
-                            continue
-                        }
-
-                        try {
-                            // Calculate relative POSIX path
-                            val relativePath = virtualFile.path
-                                .removePrefix(projectBasePath)
-                                .removePrefix("/")
-                                .replace("\\", "/")
-
-                            // Read and encode content
-                            val content = String(virtualFile.contentsToByteArray(), Charsets.UTF_8)
-                            val base64Content = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
-
-                            resourcesMap[relativePath] = base64Content
-                            logger.info("Added DMN resource: $relativePath (${content.length} chars)")
-                        } catch (e: Exception) {
-                            logger.warn("Failed to read DMN file ${virtualFile.path}", e)
-                        }
+            for (virtualFile in resourceFiles) {
+                try {
+                    // Skip files that are too large
+                    if (virtualFile.length > MAX_FILE_SIZE_BYTES) {
+                        logger.warn("Skipping large file ${virtualFile.name} (${virtualFile.length} bytes)")
+                        continue
                     }
 
-                    if (resourcesMap.isEmpty()) {
-                        logger.warn("No DMN resources found (excluding current file)")
-                    } else {
-                        logger.warn("✅ Found ${resourcesMap.size} DMN files for included models")
+                    // Validate file is still valid and accessible
+                    if (!virtualFile.isValid || !virtualFile.isInLocalFileSystem) {
+                        logger.debug("Skipping invalid or non-local file: ${virtualFile.path}")
+                        continue
                     }
+
+                    // Calculate relative POSIX path
+                    val relativePath = toPosixPath(virtualFile.path, projectBasePath)
+
+                    // Read content with proper read action for thread safety
+                    val contentBytes = ReadAction.compute<ByteArray, Exception> {
+                        virtualFile.contentsToByteArray()
+                    }
+
+                    // Validate UTF-8 content
+                    val contentString = String(contentBytes, Charsets.UTF_8)
+                    if (contentString.contains('\uFFFD')) {
+                        logger.warn("Skipping file with invalid UTF-8: ${virtualFile.name}")
+                        continue
+                    }
+
+                    // Base64 encode directly from bytes (efficient)
+                    val base64Content = Base64.getEncoder().encodeToString(contentBytes)
+
+                    resourcesMap[relativePath] = base64Content
+                    logger.debug("Added ${virtualFile.extension?.uppercase()} resource: $relativePath (${contentBytes.size} bytes)")
+                } catch (e: Exception) {
+                    logger.warn("Failed to read resource file ${virtualFile.path}", e)
                 }
+            }
 
-                EditorType.BPMN -> {
-                    logger.warn("🔍 Discovering WID files in project for custom tasks...")
-
-                    // Find all .wid files in the project using VFS
-                    val projectBaseDir = project.baseDir ?: return "{}"
-                    val widFiles = mutableListOf<VirtualFile>()
-
-                    // Recursively search for .wid files
-                    fun searchForWidFiles(dir: VirtualFile) {
-                        for (child in dir.children) {
-                            if (child.isDirectory) {
-                                searchForWidFiles(child)
-                            } else if (child.extension?.lowercase() == "wid") {
-                                widFiles.add(child)
-                            }
-                        }
-                    }
-
-                    searchForWidFiles(projectBaseDir)
-                    logger.warn("Found ${widFiles.size} WID files in project")
-
-                    for (virtualFile in widFiles) {
-                        try {
-                            // Calculate relative POSIX path
-                            val relativePath = virtualFile.path
-                                .removePrefix(projectBasePath)
-                                .removePrefix("/")
-                                .replace("\\", "/")
-
-                            // Read and encode content
-                            val content = String(virtualFile.contentsToByteArray(), Charsets.UTF_8)
-                            val base64Content = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
-
-                            resourcesMap[relativePath] = base64Content
-                            logger.info("Added WID resource: $relativePath (${content.length} chars)")
-                        } catch (e: Exception) {
-                            logger.warn("Failed to read WID file ${virtualFile.path}", e)
-                        }
-                    }
-
-                    if (resourcesMap.isEmpty()) {
-                        logger.warn("No WID resources found")
-                    } else {
-                        logger.warn("✅ Found ${resourcesMap.size} WID files for custom tasks")
-                    }
-                }
+            if (resourcesMap.isEmpty()) {
+                logger.info("No ${editorType.displayName} resources found")
+            } else {
+                logger.info("Found ${resourcesMap.size} ${editorType.displayName} resources ($countsStr)")
             }
 
             // Generate JavaScript object literal
@@ -672,6 +725,59 @@ class KogitoEditor(
             logger.error("Failed to discover resources", e)
             return "{}"
         }
+    }
+
+    /**
+     * Finds all resource files with specified extensions in the project directory.
+     *
+     * Uses an iterative approach to avoid stack overflow on deep directory trees.
+     * Excludes build directories and the current file being edited.
+     * Wrapped in ReadAction for thread safety with IntelliJ's VFS.
+     *
+     * @param rootDir The root directory to start searching from
+     * @param extensions Set of file extensions to include (lowercase)
+     * @return List of VirtualFiles matching the resource criteria
+     */
+    private fun findResourceFiles(rootDir: VirtualFile, extensions: Set<String>): List<VirtualFile> {
+        return ReadAction.compute<List<VirtualFile>, Exception> {
+            val result = mutableListOf<VirtualFile>()
+            val stack = ArrayDeque<VirtualFile>()
+            stack.add(rootDir)
+
+            while (stack.isNotEmpty()) {
+                val dir = stack.removeLast()
+
+                // Skip build directories
+                if (dir.name.lowercase() in BUILD_DIR_NAMES) {
+                    continue
+                }
+
+                for (child in dir.children) {
+                    when {
+                        child.isDirectory -> stack.add(child)
+                        child.extension?.lowercase() in extensions &&
+                                child.path != file.path -> result.add(child)
+                    }
+                }
+            }
+
+            result
+        }
+    }
+
+    /**
+     * Converts an absolute file path to a POSIX-style relative path from the project root.
+     *
+     * @param absolutePath The absolute file path
+     * @param projectBasePath The project's base directory path
+     * @return Relative POSIX path (forward slashes, no leading slash)
+     */
+    private fun toPosixPath(absolutePath: String, projectBasePath: String): String {
+        return absolutePath
+            .removePrefix(projectBasePath)
+            .removePrefix("/")
+            .removePrefix("\\")
+            .replace("\\", "/")
     }
 
     /**
@@ -727,36 +833,48 @@ class KogitoEditor(
      */
     private fun handleJsMessage(payload: String) {
         try {
-            logger.warn("📨 Received JS message: ${payload.take(100)}...")
-            when {
-                payload.startsWith("{\"type\":\"contentChanged\"") -> {
-                    val dirty = payload.contains("\"dirty\":true")
+            logger.info("Received JS message: ${payload.take(100)}...")
+
+            // Parse JSON using Gson for proper handling of special characters
+            val json: JsonObject = try {
+                JsonParser.parseString(payload).asJsonObject
+            } catch (e: Exception) {
+                logger.warn("Failed to parse JSON payload: ${payload.take(200)}", e)
+                return
+            }
+
+            val messageType = json.get("type")?.asString
+            if (messageType == null) {
+                logger.warn("Message has no 'type' field: ${payload.take(200)}")
+                return
+            }
+
+            when (messageType) {
+                "contentChanged" -> {
+                    val dirty = json.get("dirty")?.asBoolean ?: false
                     logger.info("Content changed, dirty: $dirty")
                     setModified(dirty)
                 }
-                payload.startsWith("{\"type\":\"saveRequested\"") -> {
+                "saveRequested" -> {
                     logger.info("Save requested from editor")
                     saveContent()
                 }
-                payload.startsWith("{\"type\":\"content\"") -> {
-                    val xml = payload.substringAfter("\"xml\":\"").substringBeforeLast("\"")
-                        .replace("\\n", "\n")
-                        .replace("\\\"", "\"")
-                        .replace("\\\\", "\\")
+                "content" -> {
+                    val xml = json.get("xml")?.asString ?: ""
                     logger.info("Received content from editor, size: ${xml.length}")
-                    pendingSave?.complete(xml)
-                    pendingSave = null
+                    // Atomically get and clear the pending save to avoid race conditions
+                    pendingSave.getAndSet(null)?.complete(xml)
                 }
-                payload.startsWith("{\"type\":\"editorReady\"") -> {
-                    logger.warn("🎉 Editor is ready!")
+                "editorReady" -> {
+                    logger.info("Editor is ready")
                     // Content was already loaded via initialContent promise
                 }
                 else -> {
-                    logger.warn("Unknown message type: $payload")
+                    logger.warn("Unknown message type '$messageType': ${payload.take(200)}")
                 }
             }
         } catch (e: Exception) {
-            logger.warn("Bridge payload parse error: $payload", e)
+            logger.warn("Bridge payload handling error: ${payload.take(200)}", e)
         }
     }
 
@@ -800,7 +918,7 @@ class KogitoEditor(
      * @see handleJsMessage
      */
     private fun initializeEditor(browser: JBCefBrowser) {
-        logger.warn("🌉 Creating sendToIde bridge function...")
+        logger.debug("Creating sendToIde bridge function...")
 
         // Create the bridge function manually using the JCEF query
         val bridgeScript = """
@@ -824,10 +942,10 @@ class KogitoEditor(
             })();
         """.trimIndent()
 
-        logger.warn("Executing bridge creation script...")
+        logger.debug("Executing bridge creation script...")
         browser.cefBrowser.executeJavaScript(bridgeScript, browser.cefBrowser.url, 0)
 
-        logger.warn("✅ Bridge created, now setting initial content...")
+        logger.debug("Bridge created, now setting initial content...")
 
         // Immediately provide the initial content before editor is created
         loadInitialFileContent(browser)
@@ -875,9 +993,11 @@ class KogitoEditor(
      */
     private fun loadInitialFileContent(browser: JBCefBrowser) {
         try {
-            logger.warn("📂 Loading initial file content: ${file.name} (${file.length} bytes)")
-            val content = String(file.contentsToByteArray(), Charsets.UTF_8)
-            logger.warn("📄 File content read: ${content.length} characters")
+            logger.debug("Loading initial file content: ${file.name} (${file.length} bytes)")
+            val content = ReadAction.compute<String, Exception> {
+                String(file.contentsToByteArray(), Charsets.UTF_8)
+            }
+            logger.debug("File content read: ${content.length} characters")
 
             // Use Base64 encoding to avoid any escaping issues with special characters
             val base64Content = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
@@ -909,10 +1029,10 @@ class KogitoEditor(
             """.trimIndent()
 
             browser.cefBrowser.executeJavaScript(js, browser.cefBrowser.url, 0)
-            logger.warn("✅ Initial content injection requested")
+            logger.debug("Initial content injection requested")
 
         } catch (e: Exception) {
-            logger.error("❌ Failed to load initial file content", e)
+            logger.error("Failed to load initial file content", e)
             notifyError("Failed to Load Content", e.message ?: "Unknown error")
         }
     }
@@ -1096,15 +1216,28 @@ class KogitoEditor(
      * @see browserRef
      */
     override fun dispose() {
-        // Close the Kogito editor first
-        browserRef.get()?.cefBrowser?.executeJavaScript(
-            "window.app && window.app.close && window.app.close()",
-            browserRef.get()?.cefBrowser?.url ?: "", 0
-        )
-
-        // Then dispose of JCEF resources
-        jsQueryFromJs?.dispose()
-        browserRef.getAndSet(null)?.dispose()
+        try {
+            // Close the Kogito editor first
+            val browser = browserRef.get()
+            browser?.cefBrowser?.executeJavaScript(
+                "window.app && window.app.close && window.app.close()",
+                browser.cefBrowser.url, 0
+            )
+        } catch (e: Exception) {
+            logger.warn("Failed to close Kogito editor during dispose", e)
+        } finally {
+            // Always dispose of JCEF resources, even if closing the editor failed
+            try {
+                jsQueryFromJs?.dispose()
+            } catch (e: Exception) {
+                logger.warn("Failed to dispose jsQueryFromJs", e)
+            }
+            try {
+                browserRef.getAndSet(null)?.dispose()
+            } catch (e: Exception) {
+                logger.warn("Failed to dispose browser", e)
+            }
+        }
     }
 
     // === Save Operations ===
@@ -1167,14 +1300,27 @@ class KogitoEditor(
      * @see WriteCommandAction
      */
     fun saveContent(): CompletableFuture<Boolean> {
+        // Prevent concurrent saves - if save is already in progress, return success
+        // (the in-progress save will handle the content)
+        if (!saveInProgress.compareAndSet(false, true)) {
+            logger.info("Save already in progress, skipping duplicate request")
+            return CompletableFuture.completedFuture(true)
+        }
+
         // Validate browser
-        val browser = browserRef.get() ?: return CompletableFuture.completedFuture(false)
+        val browser = browserRef.get()
+        if (browser == null) {
+            saveInProgress.set(false)
+            return CompletableFuture.completedFuture(false)
+        }
 
         // Request XML from the page. Since executeJavaScript cannot return,
         // JS will call window.sendToIde({type:"content", xml})
         val future = CompletableFuture<Boolean>()
         val contentFuture = CompletableFuture<String>()
-        pendingSave = contentFuture
+
+        // Atomically set the pending save future
+        pendingSave.set(contentFuture)
 
         // Ask JS to produce content based on editor type
         val js = when (editorType) {
@@ -1183,30 +1329,48 @@ class KogitoEditor(
         }
         browser.cefBrowser.executeJavaScript(js, browser.cefBrowser.url, 0)
 
-        contentFuture.thenAccept { xml ->
-            try {
-                WriteCommandAction.runWriteCommandAction(project) {
-                    file.setBinaryContent(xml.toByteArray(Charsets.UTF_8))
-                }
-                setModified(false)
-                future.complete(true)
+        // Add timeout to prevent hanging indefinitely if JS never responds
+        contentFuture
+            .orTimeout(SAVE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .thenAccept { xml ->
+                // Schedule write on EDT to avoid deadlock - thenAccept runs on JCEF thread,
+                // but WriteCommandAction needs EDT. Using invokeLater avoids blocking.
+                ApplicationManager.getApplication().invokeLater {
+                    try {
+                        WriteCommandAction.runWriteCommandAction(project) {
+                            file.setBinaryContent(xml.toByteArray(Charsets.UTF_8))
+                        }
+                        setModified(false)
+                        future.complete(true)
 
-                // Call markAsSaved() to reset editor state and fire content change callbacks
-                browser.cefBrowser.executeJavaScript(
-                    "window.app && window.app.markAsSaved && window.app.markAsSaved()",
-                    browser.cefBrowser.url, 0
-                )
-            } catch (e: Exception) {
-                logger.error("Save error", e)
-                notifyError("Save Failed", e.message ?: "Unknown error")
+                        // Call markAsSaved() to reset editor state and fire content change callbacks
+                        browser.cefBrowser.executeJavaScript(
+                            "window.app && window.app.markAsSaved && window.app.markAsSaved()",
+                            browser.cefBrowser.url, 0
+                        )
+                    } catch (e: Exception) {
+                        logger.error("Save error", e)
+                        notifyError("Save Failed", e.message ?: "Unknown error")
+                        future.complete(false)
+                    } finally {
+                        // Always clear the save-in-progress flag
+                        saveInProgress.set(false)
+                    }
+                }
+            }.exceptionally { ex ->
+                // Clear pending save and save-in-progress flag on any error
+                pendingSave.set(null)
+                saveInProgress.set(false)
+
+                val message = when (ex.cause) {
+                    is TimeoutException -> "Save operation timed out after ${SAVE_TIMEOUT_SECONDS}s"
+                    else -> ex.cause?.message ?: ex.message ?: "Could not retrieve content"
+                }
+                logger.error("Could not retrieve content from JS: $message", ex)
+                notifyError("Save Failed", message)
                 future.complete(false)
+                null
             }
-        }.exceptionally { ex ->
-            logger.error("Could not retrieve content from JS", ex)
-            notifyError("Save Failed", ex.message ?: "Could not retrieve content")
-            future.complete(false)
-            null
-        }
 
         return future
     }

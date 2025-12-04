@@ -310,16 +310,6 @@ tasks {
         }
     }
 
-    // Clean task to remove downloaded Node.js binaries
-    register<Delete>("cleanNodeBinaries") {
-        description = "Clean downloaded Node.js binaries"
-        group = "cleanup"
-        delete("src/main/resources/nodejs")
-    }
-
-    clean {
-        dependsOn("cleanNodeBinaries")
-    }
 }
 
 intellijPlatformTesting {

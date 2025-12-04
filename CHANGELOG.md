@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2025-11-22
+
+### Added
+- **Dynamic DMN Model Loading**: DMN files can now load included models on-demand instead of all at initialization
+  - Implements request/response protocol between TypeScript and Kotlin for model discovery and loading
+  - JavaScript requests available models via `requestAvailableModels()`
+  - JavaScript loads specific models via `requestModelByPath()`
+  - Kotlin `IncludedModelsService` handles file discovery, security validation, and content encoding
+  - Supports both DMN and PMML model types
+  - 10MB file size limit for performance and security
+  - Comprehensive security: project bounds validation, build directory exclusion, path traversal protection
+  - File-relative path calculation ensures cross-platform compatibility
+- **PMML Model Support**: PMML (Predictive Model Markup Language) files can now be loaded as external models
+  - PMML files discovered and loaded alongside DMN files
+  - Raw XML content passed to DMN editor for model referencing
+  - Enables predictive analytics integration in DMN decisions
+
+### Technical Improvements
+- Added `IncludedModelsService.kt` for centralized model discovery and loading
+  - Uses `ProjectFileIndex` for efficient file iteration
+  - Implements proper security checks via `ProjectFileIndex.isInContent()`
+  - Base64 encoding for safe JCEF bridge transmission
+  - Proper `ReadAction` wrapping for IntelliJ Platform thread safety
+- Enhanced TypeScript bridge in `main.ts` with async request/response handling
+  - Promise-based API with configurable timeouts (10s for models, 15s for discovery)
+  - Request correlation via unique request IDs
+  - Granular error handling (decode, parse, network errors)
+  - `pendingModelRequests` Map for tracking in-flight requests
+- Updated `KogitoEditor.kt` message handlers for `requestAvailableModels` and `requestModel` messages
+  - Background thread execution for non-blocking file operations
+  - JSON response formatting with proper escaping
+- Comprehensive unit test suite (19 tests) covering:
+  - Model discovery with various file structures
+  - Model loading with security validation
+  - Build directory exclusion
+  - Special characters and deeply nested paths
+  - File size limits and error handling
+- **Type Safety Enhancements**
+  - Added comprehensive TypeScript type definitions in `global.d.ts`
+  - Defined discriminated union types for bridge messages (`JsToKotlinMessage`, `KotlinToJsMessage`)
+  - Type-safe `toIde()` function signature with proper import
+- **Code Quality**
+  - Centralized EditorType enum with file extension handling
+  - Exception-safe dispose() with try-finally pattern
+  - Gson-based type-safe JSON parsing with proper error handling
+  - CompletableFuture timeouts to prevent hanging operations
+  - Normalized logging levels (debug vs warn vs error)
+  - Removed emojis from production log messages
+
+### Fixed
+- **EDT Deadlock on Save**: Fixed infinite loading wheel when pressing Cmd+S/Ctrl+S to save DMN/BPMN files
+  - Root cause: `CompletableFuture.thenAccept()` callback ran on JCEF thread, but `WriteCommandAction` requires EDT
+  - Solution: Wrapped write operation in `ApplicationManager.invokeLater{}` to schedule on EDT without blocking
+  - Prevents deadlock between JCEF callback thread and Event Dispatch Thread
+- **DMN Included Models Path Display**: Fixed conflict between old static resource system (v0.0.4) and new dynamic loading system (v0.0.5)
+  - Removed legacy static DMN resource discovery that used project-relative paths
+  - DMN editor now exclusively uses dynamic model loading with file-relative paths
+  - Fixes incompatibility with VS Code Kogito extension
+  - Paths now display as `applicant-demographics.dmn` instead of `/kogito/poc-medicaid-rules/src/main/resources/applicant-demographics.dmn`
+- **DMN Included Models Path Calculation**: Fixed path calculation for DMN included models to be file-relative instead of project-relative
+  - Uses `Path.relativize()` to calculate proper relative paths between files
+  - Same directory: `other-model.dmn`
+  - Subdirectory: `subdir/other-model.dmn`
+  - Parent directory: `../other-model.dmn`
+  - Sibling directory: `../sibling/other-model.dmn`
+  - Ensures compatibility with the VS Code Kogito extension and proper model resolution
+  - Fixes "External model not found" errors when opening DMN files created with this plugin in VS Code
+- **UTF-8 Handling**: Fixed Base64 decoding to properly handle multi-byte UTF-8 characters using `TextDecoder`
+
 ## [0.0.4] - 2025-11-18
 
 ### Added
@@ -26,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `discoverResources()` method in `KogitoEditor.kt` for intelligent resource discovery
   - Uses `FileTypeIndex` for efficient DMN file discovery (indexed search)
   - Uses VFS traversal for WID file discovery
-  - Calculates relative POSIX paths from project root (Windows-compatible)
+  - Calculates relative POSIX paths for cross-platform compatibility (Windows/Mac/Linux)
   - Base64-encodes file contents for secure transmission to JavaScript
   - Excludes current file from DMN resources to avoid circular references
 - Added `buildResourcesMap()` function in `main.ts` to decode and format resources

@@ -1,5 +1,6 @@
 package com.github.palmersoftwareconsulting.kogitointellijplugin.listener
 
+import com.github.palmersoftwareconsulting.kogitointellijplugin.editor.EditorType
 import com.github.palmersoftwareconsulting.kogitointellijplugin.editor.KogitoEditor
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileDocumentManagerListener
@@ -21,7 +22,7 @@ import com.intellij.openapi.vfs.VirtualFile
  * 1. IntelliJ triggers "Save All" action (Cmd+S, Ctrl+S, File > Save All)
  * 2. [beforeAllDocumentsSaving] is called before any documents are saved
  * 3. Iterates through all open projects and their open files
- * 4. Identifies Kogito files (.bpmn, .bpmn2, .dmn)
+ * 4. Identifies Kogito files (.bpmn, .bpmn2, .dmn) using [EditorType.isSupported]
  * 5. Calls [KogitoEditor.saveContent] for modified editors
  *
  * ## Why CefKeyboardHandler Doesn't Work
@@ -49,6 +50,7 @@ import com.intellij.openapi.vfs.VirtualFile
  *
  * @see KogitoEditor.saveContent
  * @see FileDocumentManagerListener
+ * @see EditorType
  *
  * @since 0.0.3
  */
@@ -56,9 +58,6 @@ class KogitoSaveListener : FileDocumentManagerListener {
 
     companion object {
         private val logger = Logger.getInstance(KogitoSaveListener::class.java)
-
-        /** File extensions that Kogito editors handle. */
-        private val KOGITO_EXTENSIONS = setOf("bpmn", "bpmn2", "dmn")
     }
 
     /**
@@ -80,12 +79,14 @@ class KogitoSaveListener : FileDocumentManagerListener {
      * @see saveKogitoEditorsInProject
      */
     override fun beforeAllDocumentsSaving() {
-        logger.info("Save All triggered - checking for Kogito editors")
+        logger.debug("Save All triggered - checking for Kogito editors")
 
-        // Iterate through all open projects
-        ProjectManager.getInstance().openProjects.forEach { project ->
-            saveKogitoEditorsInProject(project)
-        }
+        // Iterate through all open projects, filtering out disposed ones
+        ProjectManager.getInstance().openProjects
+            .filter { !it.isDisposed }
+            .forEach { project ->
+                saveKogitoEditorsInProject(project)
+            }
     }
 
     /**
@@ -94,7 +95,7 @@ class KogitoSaveListener : FileDocumentManagerListener {
      * This method:
      * 1. Gets the FileEditorManager for the project
      * 2. Iterates through all open files in the project
-     * 3. Filters for Kogito files using [isKogitoFile]
+     * 3. Filters for Kogito files using [EditorType.isSupported]
      * 4. Gets all editor instances for each file
      * 5. Checks if editor is a [KogitoEditor] and is modified
      * 6. Calls [KogitoEditor.saveContent] for modified editors
@@ -109,48 +110,31 @@ class KogitoSaveListener : FileDocumentManagerListener {
      *
      * @param project The project to scan for Kogito editors
      * @see FileEditorManager
-     * @see isKogitoFile
+     * @see EditorType.isSupported
      */
     private fun saveKogitoEditorsInProject(project: Project) {
         val fileEditorManager = FileEditorManager.getInstance(project)
 
-        // Get all open files
-        fileEditorManager.openFiles.forEach { virtualFile ->
-            // Check if this is a Kogito file
-            if (isKogitoFile(virtualFile)) {
-                logger.info("Found Kogito file: ${virtualFile.name}")
-
-                // Get all editors for this file
-                fileEditorManager.getEditors(virtualFile).forEach { fileEditor ->
-                    if (fileEditor is KogitoEditor && fileEditor.isModified) {
-                        logger.info("Saving modified Kogito editor: ${virtualFile.name}")
-                        fileEditor.saveContent()
+        // Get all open files, filtering for valid Kogito files
+        fileEditorManager.openFiles.asSequence()
+            .filter { it.isValid && EditorType.isSupported(it) }
+            .flatMap { fileEditorManager.getEditors(it).asSequence() }
+            .filterIsInstance<KogitoEditor>()
+            .filter { it.isModified }
+            .forEach { editor ->
+                val fileName = editor.file.name
+                logger.info("Saving modified Kogito editor: $fileName")
+                try {
+                    editor.saveContent().whenComplete { success, throwable ->
+                        if (throwable != null) {
+                            logger.error("Failed to save $fileName", throwable)
+                        } else if (success != true) {
+                            logger.warn("Save operation reported failure for $fileName")
+                        }
                     }
+                } catch (e: Exception) {
+                    logger.error("Failed to initiate save for $fileName", e)
                 }
             }
-        }
-    }
-
-    /**
-     * Checks if a virtual file is a Kogito file (BPMN or DMN).
-     *
-     * A file is considered a Kogito file if its extension (case-insensitive) is:
-     * - `bpmn` - BPMN 2.0 files
-     * - `bpmn2` - Alternative BPMN 2.0 extension
-     * - `dmn` - DMN (Decision Model and Notation) files
-     *
-     * ## Null Safety
-     * Returns false if the file has no extension (null-safe check).
-     *
-     * ## Case Insensitivity
-     * Extension comparison is case-insensitive (.BPMN, .bpmn, .Bpmn all match).
-     *
-     * @param file The virtual file to check
-     * @return true if the file is a BPMN or DMN file, false otherwise
-     * @see KOGITO_EXTENSIONS
-     */
-    private fun isKogitoFile(file: VirtualFile): Boolean {
-        val extension = file.extension?.lowercase()
-        return extension in KOGITO_EXTENSIONS
     }
 }
