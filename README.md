@@ -71,6 +71,61 @@ The plugin uses **direct JCEF integration** with bundled JavaScript editors:
 - **IntelliJ IDEA**: 2024.3.6 or later (with JCEF support)
 - **JDK**: 21 or later (for plugin development only)
 
+### IntelliJ 2025.x Compatibility
+
+IntelliJ 2025.1+ introduced out-of-process JCEF mode by default (IJPL-162747), which causes two issues for this plugin:
+1. **Freezes when editing** (IJPL-186252) - Known bug in out-of-process JCEF
+2. **Drag-and-drop breaks** (JBR-7399) - Out-of-process mode forces OSR (Off-Screen Rendering), which doesn't support HTML5 drag-and-drop
+
+**Why this can't be fixed in code**: When out-of-process mode is enabled, `JBCefBrowserBuilder.setOffScreenRendering(false)` is **ignored** by IntelliJ's JCEF implementation:
+
+```java
+// From JBCefBrowserBuilder.java
+public JBCefBrowserBuilder setOffScreenRendering(boolean isOffScreenRendering) {
+    if (!isOffScreenRendering) {
+        if (JBCefApp.isRemoteEnabled()) {
+            LOG.warn("Trying to create windowed browser when remote-mode is enabled. " +
+                     "Settings isOffScreenRendering=false will be ignored.");
+            myIsOffScreenRendering = true;  // Forced back to true!
+            return this;
+        }
+    }
+    myIsOffScreenRendering = isOffScreenRendering;
+    return this;
+}
+```
+
+The `IS_REMOTE_ENABLED` flag in `JBCefApp` is declared `static final` and set during class initialization before any plugin code runs - it cannot be changed at runtime:
+
+```java
+// From JBCefApp.java
+private static final boolean IS_REMOTE_ENABLED;
+
+static {
+    // ... registry/property checks ...
+    IS_REMOTE_ENABLED = CefApp.isRemoteEnabled();
+}
+
+static boolean isRemoteEnabled() {
+    return IS_REMOTE_ENABLED;
+}
+```
+
+**Source links**:
+- [JBCefBrowserBuilder.java](https://github.com/JetBrains/intellij-community/blob/idea/252.25557.131/platform/ui.jcef/jcef/JBCefBrowserBuilder.java)
+- [JBCefApp.java](https://github.com/JetBrains/intellij-community/blob/idea/252.25557.131/platform/ui.jcef/jcef/JBCefApp.java)
+
+The VM option must be set before the IDE starts.
+
+**For development** (`./gradlew runIde`): The plugin automatically adds `-Dide.browser.jcef.out-of-process.enabled=false` to fix this.
+
+**For installed plugins**: Add this VM option manually:
+1. **Help** → **Edit Custom VM Options**
+2. Add: `-Dide.browser.jcef.out-of-process.enabled=false`
+3. Restart IntelliJ
+
+This reverts JCEF to in-process mode, restoring drag-and-drop and fixing the freeze issues.
+
 The plugin is fully self-contained:
 - No external dependencies required for end users
 - JavaScript editors are pre-bundled during build
@@ -408,6 +463,17 @@ kie-kogito-intellij-plugin/
 
 ### Common Issues
 
+#### Editor Freezes When Adding Elements (IntelliJ 2025.x)
+
+**Cause:** IntelliJ 2025.1+ uses out-of-process JCEF mode by default, which has known bugs (IJPL-186252) causing freezes.
+
+**Solution:**
+1. **Help** → **Edit Custom VM Options**
+2. Add: `-Dide.browser.jcef.out-of-process.enabled=false`
+3. Restart IntelliJ
+
+This disables out-of-process JCEF and reverts to in-process mode, which is stable and supports drag-and-drop.
+
 #### Editor Shows "Loading..." Indefinitely
 
 **Possible Causes:**
@@ -431,11 +497,18 @@ kie-kogito-intellij-plugin/
 
 #### Drag-and-Drop Not Working
 
-**Cause:** OSR (Off-Screen Rendering) might have been re-enabled.
+**Cause:** OSR (Off-Screen Rendering) might be forced on due to out-of-process JCEF mode.
 
-**Solution:**
-- Verify KogitoEditor.kt line 100-102 has `.setOffScreenRendering(false)`
-- Rebuild plugin: `./gradlew clean buildPlugin`
+**Solutions:**
+
+1. **IntelliJ 2025.x users**: Add VM option to disable out-of-process JCEF:
+   - **Help** → **Edit Custom VM Options**
+   - Add: `-Dide.browser.jcef.out-of-process.enabled=false`
+   - Restart IntelliJ
+
+2. **Verify code** (for developers):
+   - Check KogitoEditor.kt has `.setOffScreenRendering(false)`
+   - Rebuild plugin: `./gradlew clean buildPlugin`
 
 #### Files Not Saving with Cmd+S / Ctrl+S
 

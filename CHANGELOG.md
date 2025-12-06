@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6] - 2025-12-05
+
+### Added
+- **IntelliJ 2025.x Compatibility**: Added workaround for out-of-process JCEF mode issues
+  - IntelliJ 2025.1+ enables out-of-process JCEF by default (IJPL-162747)
+  - This causes editor freezes (IJPL-186252) and breaks drag-and-drop (JBR-7399)
+  - Note: `JBCefBrowserBuilder.setOffScreenRendering(false)` is ignored when out-of-process mode is enabled - the VM option is the only workaround
+  - Added `-Dide.browser.jcef.out-of-process.enabled=false` VM option to `runIde` task
+  - Reverts to in-process JCEF mode which is stable and supports drag-and-drop
+  - **For installed plugins**: Go to **Help → Edit Custom VM Options**, add `-Dide.browser.jcef.out-of-process.enabled=false`, and restart IntelliJ
+
+### Fixed
+- Fixed "Project already disposed" error when closing project with unsaved editor changes
+
+### Changed
+- Updated `platformVersion` to 2025.2.5 for development/testing
+
 ## [0.0.5] - 2025-11-22
 
 ### Added

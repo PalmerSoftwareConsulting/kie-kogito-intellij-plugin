@@ -333,11 +333,13 @@ intellijPlatformTesting {
     }
 }
 
-// Configure the default runIde task with JCEF remote debugging
+// Configure the default runIde task with JCEF settings
 tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
     jvmArgumentProviders += CommandLineArgumentProvider {
         listOf(
             "-Dcef.remote.debugging.port=9222",
+            // Disable out-of-process JCEF to fix freeze issues (IJPL-186252) and enable drag-and-drop
+            "-Dide.browser.jcef.out-of-process.enabled=false",
         )
     }
 }

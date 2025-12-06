@@ -11,6 +11,7 @@ import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
+import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.IdeFocusManager
@@ -117,6 +118,12 @@ class KogitoEditor(
 
         /** Maximum file size in bytes for resource files (10MB). */
         private const val MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024L
+
+        /** Flag to ensure OSR warning is only shown once per IDE session. */
+        private val osrWarningShown = AtomicBoolean(false)
+
+        /** Flag to ensure we only attempt to disable out-of-process JCEF once per IDE session. */
+        private val outOfProcessDisableAttempted = AtomicBoolean(false)
     }
 
     /**
@@ -276,6 +283,17 @@ class KogitoEditor(
                 logger.error("JCEF is not supported on this platform")
                 notifyError("JCEF Not Supported", "Your IDE version doesn't support embedded browsers")
                 return
+            }
+
+            // Try to disable out-of-process JCEF mode before creating browser
+            // This may not work if JCEF is already initialized, but worth trying
+            tryDisableOutOfProcessJcef()
+
+            // Check if OSR mode is forced (IntelliJ 2025.x out-of-process JCEF)
+            // When OSR is forced, drag-and-drop won't work and freezes may occur
+            if (JBCefApp.isOffScreenRenderingModeEnabled()) {
+                logger.warn("JCEF is running in OSR mode - drag-and-drop may not work")
+                showOsrWarningOnce()
             }
 
             logger.debug("JCEF is supported, creating browser instance with OSR disabled for drag-and-drop")
@@ -1072,6 +1090,58 @@ class KogitoEditor(
     }
 
     /**
+     * Shows a warning notification about OSR mode limitations, only once per IDE session.
+     *
+     * IntelliJ 2025.x enables out-of-process JCEF by default, which forces OSR mode.
+     * This breaks drag-and-drop functionality and may cause freezes (IJPL-186252).
+     * Users need to add a VM option to disable out-of-process mode.
+     */
+    private fun showOsrWarningOnce() {
+        // Only show the warning once per IDE session using compare-and-set
+        if (osrWarningShown.compareAndSet(false, true)) {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("Kogito Editor")
+                .createNotification(
+                    "Kogito Editor: Drag-and-Drop May Not Work",
+                    """
+                    IntelliJ 2025.x uses out-of-process JCEF mode which disables drag-and-drop.
+                    <br><br>
+                    To fix this, add the following VM option:
+                    <br><b>-Dide.browser.jcef.out-of-process.enabled=false</b>
+                    <br><br>
+                    Go to <b>Help → Edit Custom VM Options</b>, add the line, and restart IntelliJ.
+                    """.trimIndent(),
+                    NotificationType.WARNING
+                )
+                .notify(project)
+        }
+    }
+
+    /**
+     * Attempts to disable out-of-process JCEF mode via the registry.
+     *
+     * IntelliJ 2025.x enables out-of-process JCEF by default, which forces OSR mode
+     * and breaks drag-and-drop. This method tries to disable it before the browser
+     * is created, but may not work if JCEF is already initialized.
+     *
+     * Only attempts once per IDE session to avoid repeated registry access.
+     */
+    private fun tryDisableOutOfProcessJcef() {
+        if (outOfProcessDisableAttempted.compareAndSet(false, true)) {
+            try {
+                val key = "ide.browser.jcef.out-of-process.enabled"
+                if (Registry.`is`(key)) {
+                    logger.info("Attempting to disable out-of-process JCEF mode via registry")
+                    Registry.get(key).setValue(false)
+                    logger.info("Registry key '$key' set to false")
+                }
+            } catch (e: Exception) {
+                logger.warn("Failed to disable out-of-process JCEF via registry: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Updates the modified state and notifies property change listeners.
      *
      * This method uses compare-and-set semantics to update [isModified]:
@@ -1300,6 +1370,12 @@ class KogitoEditor(
      * @see WriteCommandAction
      */
     fun saveContent(): CompletableFuture<Boolean> {
+        // Check if project is disposed
+        if (project.isDisposed) {
+            logger.debug("Project is disposed, skipping save")
+            return CompletableFuture.completedFuture(false)
+        }
+
         // Prevent concurrent saves - if save is already in progress, return success
         // (the in-progress save will handle the content)
         if (!saveInProgress.compareAndSet(false, true)) {
@@ -1337,6 +1413,13 @@ class KogitoEditor(
                 // but WriteCommandAction needs EDT. Using invokeLater avoids blocking.
                 ApplicationManager.getApplication().invokeLater {
                     try {
+                        // Check if project is disposed before writing
+                        if (project.isDisposed) {
+                            logger.debug("Project disposed before save completed, skipping write")
+                            future.complete(false)
+                            saveInProgress.set(false)
+                            return@invokeLater
+                        }
                         WriteCommandAction.runWriteCommandAction(project) {
                             file.setBinaryContent(xml.toByteArray(Charsets.UTF_8))
                         }
