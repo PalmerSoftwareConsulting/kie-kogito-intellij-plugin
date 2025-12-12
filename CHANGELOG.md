@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7] - 2025-12-12
+
+### Fixed
+- **Memory Leak on Editor Close**: Fixed significant memory leak when opening/closing DMN and BPMN files
+  - Root cause: CEF handlers and JBCefJSQuery references were never removed during disposal
+  - 22 disposed KogitoEditor instances were being retained, accumulating ~1.4GB in `LOADHTML_REQUEST_MAP`
+  - Added proper Disposer hierarchy: `Editor → Browser → JSQuery` for automatic cleanup
+  - Store and remove all CEF handlers (context menu, display, load, keyboard) during disposal
+  - Added `disposed` AtomicBoolean flag to prevent double-disposal race conditions
+  - Fixed lambda closure leak in load handler by using `browserRef.get()` instead of capturing `this`
+  - Navigate to `about:blank` before disposal to mitigate IntelliJ Platform `LOADHTML_REQUEST_MAP` leak
+  - Added individual try-catch blocks around handler removal for resilient cleanup
+- **BPMN Work Item Definition Paths**: Updated BPMN editor to use file-relative paths for WID resources
+  - Paths now calculated relative to the BPMN file being edited
+  - Ensures consistency with DMN included models path handling
+  - Improves cross-IDE compatibility
+
 ## [0.0.6] - 2025-12-05
 
 ### Added

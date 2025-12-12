@@ -10,6 +10,7 @@ import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vfs.VirtualFile
@@ -22,11 +23,14 @@ import com.intellij.ui.jcef.JBCefJSQuery
 import com.intellij.ui.jcef.JBCefBrowserBuilder
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
-import org.cef.handler.CefLoadHandlerAdapter
+import org.cef.handler.CefContextMenuHandler
 import org.cef.handler.CefContextMenuHandlerAdapter
+import org.cef.handler.CefDisplayHandler
 import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefKeyboardHandler
 import org.cef.handler.CefKeyboardHandlerAdapter
+import org.cef.handler.CefLoadHandler
+import org.cef.handler.CefLoadHandlerAdapter
 import org.cef.CefSettings
 import org.cef.misc.BoolRef
 import com.google.gson.JsonObject
@@ -203,6 +207,34 @@ class KogitoEditor(
      */
     private val saveInProgress = AtomicBoolean(false)
 
+    // ============================================================
+    // CEF Handler References (stored for cleanup in dispose())
+    // ============================================================
+    // These handlers are added to JBCefClient and must be removed
+    // to prevent memory leaks when the editor is closed.
+
+    /** Context menu handler that disables right-click menu. */
+    private var contextMenuHandler: CefContextMenuHandler? = null
+
+    /** Display handler that captures JavaScript console messages. */
+    private var displayHandler: CefDisplayHandler? = null
+
+    /** Load handler that initializes the editor when page loads. */
+    private var loadHandler: CefLoadHandler? = null
+
+    /** Keyboard handler for Cmd+S / Ctrl+S save shortcut. */
+    private var keyboardHandler: CefKeyboardHandler? = null
+
+    /**
+     * Flag indicating the editor has been disposed.
+     *
+     * Used to:
+     * - Prevent operations (save, JS execution) after disposal starts
+     * - Guard against double-dispose calls
+     * - Break race conditions between save operations and disposal
+     */
+    private val disposed = AtomicBoolean(false)
+
     /**
      * Initializes the editor component and begins browser creation.
      *
@@ -305,6 +337,11 @@ class KogitoEditor(
             browserRef.set(browser)
             logger.debug("Browser instance created successfully (OSR disabled)")
 
+            // Register browser with Disposer hierarchy: Editor → Browser
+            // This ensures browser is automatically disposed if editor is disposed via Disposer
+            Disposer.register(this, browser)
+            logger.debug("Browser registered with Disposer hierarchy")
+
             // Setup JS -> JVM bridge
             logger.debug("Setting up JS->JVM bridge")
             jsQueryFromJs = JBCefJSQuery.create(browser as JBCefBrowserBase).apply {
@@ -315,10 +352,14 @@ class KogitoEditor(
                 }
             }
 
+            // Register JS query with Disposer hierarchy: Browser → JSQuery
+            // This creates disposal chain: Editor → Browser → JSQuery
+            Disposer.register(browser, jsQueryFromJs!!)
+
             // Add context menu handler to disable right-click menu
             val client = browser.jbCefClient
             logger.debug("Adding context menu handler to disable right-click menu")
-            client.addContextMenuHandler(object : CefContextMenuHandlerAdapter() {
+            contextMenuHandler = object : CefContextMenuHandlerAdapter() {
                 override fun onBeforeContextMenu(
                     browser: CefBrowser,
                     frame: CefFrame,
@@ -328,11 +369,12 @@ class KogitoEditor(
                     // Clear the context menu model to disable the menu
                     model.clear()
                 }
-            }, browser.cefBrowser)
+            }
+            client.addContextMenuHandler(contextMenuHandler!!, browser.cefBrowser)
 
             // Add display handler to capture console.log messages from JavaScript
             logger.debug("Adding display handler to capture JavaScript console messages")
-            client.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+            displayHandler = object : CefDisplayHandlerAdapter() {
                 override fun onConsoleMessage(
                     cefBrowser: CefBrowser,
                     level: CefSettings.LogSeverity,
@@ -361,11 +403,14 @@ class KogitoEditor(
                     // Return false to allow default handling (still show in DevTools if open)
                     return false
                 }
-            }, browser.cefBrowser)
+            }
+            client.addDisplayHandler(displayHandler!!, browser.cefBrowser)
 
             // Add load handler to inject bridge and initialize editor
+            // NOTE: We use browserRef.get() instead of capturing 'browser' from outer scope
+            // to avoid memory leaks from lambda closures holding strong references
             logger.debug("Adding load handler")
-            client.addLoadHandler(object : CefLoadHandlerAdapter() {
+            loadHandler = object : CefLoadHandlerAdapter() {
                 override fun onLoadStart(
                     cefBrowser: CefBrowser,
                     frame: CefFrame,
@@ -377,9 +422,14 @@ class KogitoEditor(
                 override fun onLoadEnd(cefBrowser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
                     logger.info("Load ended for frame: ${frame.url}, status: $httpStatusCode, isMain: ${frame.isMain}")
                     if (frame.isMain) {
-                        // Console output is captured by CefDisplayHandler above and logged to IDE log
-                        logger.info("Initializing editor...")
-                        initializeEditor(browser)
+                        // Use browserRef to avoid capturing 'browser' from outer scope
+                        val jbBrowser = browserRef.get()
+                        if (jbBrowser != null && !disposed.get()) {
+                            logger.info("Initializing editor...")
+                            initializeEditor(jbBrowser)
+                        } else {
+                            logger.warn("Browser unavailable or editor disposed, skipping initialization")
+                        }
                     }
                 }
 
@@ -392,7 +442,8 @@ class KogitoEditor(
                 ) {
                     logger.error("Load error: $errorText (code: $errorCode) for URL: $failedUrl")
                 }
-            }, browser.cefBrowser)
+            }
+            client.addLoadHandler(loadHandler!!, browser.cefBrowser)
 
             // Replace loading label with browser
             logger.debug("Replacing loading label with browser component")
@@ -403,7 +454,7 @@ class KogitoEditor(
 
             // Add keyboard handler for Cmd+S / Ctrl+S at the CEF level
             logger.debug("Adding CefKeyboardHandler for Cmd+S / Ctrl+S")
-            client.addKeyboardHandler(object : CefKeyboardHandlerAdapter() {
+            keyboardHandler = object : CefKeyboardHandlerAdapter() {
                 override fun onPreKeyEvent(
                     browser: CefBrowser,
                     event: CefKeyboardHandler.CefKeyEvent,
@@ -426,7 +477,8 @@ class KogitoEditor(
 
                     return false // Let other events pass through
                 }
-            }, browser.cefBrowser)
+            }
+            client.addKeyboardHandler(keyboardHandler!!, browser.cefBrowser)
             logger.debug("CefKeyboardHandler added successfully")
 
             // Load the bundled HTML with inline JavaScript
@@ -692,8 +744,13 @@ class KogitoEditor(
                         continue
                     }
 
-                    // Calculate relative POSIX path
-                    val relativePath = toPosixPath(virtualFile.path, projectBasePath)
+                    // Calculate relative POSIX path based on editor type
+                    // - DMN: Uses project-root-relative paths for included models
+                    // - BPMN: Uses file-relative paths for Work Item Definitions
+                    val relativePath = when (editorType) {
+                        EditorType.DMN -> toPosixPathFromProjectRoot(virtualFile.path, projectBasePath)
+                        EditorType.BPMN -> toPosixPathFromCurrentFile(virtualFile.path, file.path)
+                    }
 
                     // Read content with proper read action for thread safety
                     val contentBytes = ReadAction.compute<ByteArray, Exception> {
@@ -790,12 +847,46 @@ class KogitoEditor(
      * @param projectBasePath The project's base directory path
      * @return Relative POSIX path (forward slashes, no leading slash)
      */
-    private fun toPosixPath(absolutePath: String, projectBasePath: String): String {
+    private fun toPosixPathFromProjectRoot(absolutePath: String, projectBasePath: String): String {
         return absolutePath
             .removePrefix(projectBasePath)
             .removePrefix("/")
             .removePrefix("\\")
             .replace("\\", "/")
+    }
+
+    /**
+     * Converts an absolute file path to a POSIX-style relative path from the current file's directory.
+     *
+     * Used by BPMN editor where resources need to be relative to the file being edited,
+     * not the project root.
+     *
+     * @param resourcePath The absolute path to the resource file
+     * @param currentFilePath The absolute path to the file being edited
+     * @return Relative POSIX path (e.g., "../tasks/custom.wid", "./sibling.wid")
+     */
+    private fun toPosixPathFromCurrentFile(resourcePath: String, currentFilePath: String): String {
+        val resourceParts = resourcePath.replace("\\", "/").split("/").filter { it.isNotEmpty() }
+        val currentDir = currentFilePath.replace("\\", "/").substringBeforeLast("/")
+        val currentParts = currentDir.split("/").filter { it.isNotEmpty() }
+
+        // Find common prefix length
+        var commonLength = 0
+        while (commonLength < resourceParts.size && commonLength < currentParts.size &&
+            resourceParts[commonLength] == currentParts[commonLength]) {
+            commonLength++
+        }
+
+        // Build relative path: go up from current directory, then down to resource
+        val upCount = currentParts.size - commonLength
+        val downParts = resourceParts.drop(commonLength)
+
+        val relativePath = buildString {
+            repeat(upCount) { append("../") }
+            append(downParts.joinToString("/"))
+        }
+
+        return relativePath.ifEmpty { "./" + resourceParts.last() }
     }
 
     /**
@@ -1286,28 +1377,114 @@ class KogitoEditor(
      * @see browserRef
      */
     override fun dispose() {
+        // Guard against double-dispose and mark as disposed atomically
+        // This prevents race conditions with concurrent operations like saveContent()
+        if (!disposed.compareAndSet(false, true)) {
+            logger.debug("dispose() already called for ${file.name}, skipping")
+            return
+        }
+
+        logger.info("Disposing KogitoEditor for ${file.name}")
+
+        // 1. Cancel pending operations FIRST to prevent race conditions
+        pendingSave.getAndSet(null)?.cancel(true)
+        saveInProgress.set(false)
+
+        // 2. Clear listeners early to prevent notifications during cleanup
+        listeners.clear()
+
+        // 3. Clear UI references BEFORE disposing browser
+        // This removes the browser component from the Swing hierarchy first
         try {
-            // Close the Kogito editor first
-            val browser = browserRef.get()
+            editorPanel.removeAll()
+        } catch (e: Exception) {
+            logger.debug("Failed to clear editorPanel", e)
+        }
+
+        // 4. Get browser reference (only once, atomically clear it)
+        val browser = browserRef.getAndSet(null)
+
+        // 5. Close the Kogito editor via JS
+        try {
             browser?.cefBrowser?.executeJavaScript(
                 "window.app && window.app.close && window.app.close()",
                 browser.cefBrowser.url, 0
             )
         } catch (e: Exception) {
-            logger.warn("Failed to close Kogito editor during dispose", e)
-        } finally {
-            // Always dispose of JCEF resources, even if closing the editor failed
-            try {
-                jsQueryFromJs?.dispose()
-            } catch (e: Exception) {
-                logger.warn("Failed to dispose jsQueryFromJs", e)
+            logger.debug("Failed to close Kogito editor during dispose", e)
+        }
+
+        // 6. Navigate to about:blank to help release HTML content from
+        // LOADHTML_REQUEST_MAP (WeakHashMap in JBCefFileSchemeHandlerFactory)
+        // This clears the loaded content before disposing the browser
+        try {
+            browser?.loadURL("about:blank")
+        } catch (e: Exception) {
+            logger.debug("Failed to navigate to about:blank before dispose", e)
+        }
+
+        // 7. Remove CEF handlers from client BEFORE disposing browser
+        // This is critical to prevent memory leaks - handlers hold references
+        // to KogitoEditor via lambdas and must be explicitly removed
+        // Remove each handler individually with its own try-catch
+        // This ensures partial failures don't prevent other handlers from being removed
+        val client = browser?.jbCefClient
+        val cefBrowser = browser?.cefBrowser
+
+        if (client != null && cefBrowser != null) {
+            contextMenuHandler?.let { handler ->
+                try {
+                    client.removeContextMenuHandler(handler, cefBrowser)
+                    logger.debug("Removed context menu handler")
+                } catch (e: Exception) {
+                    logger.warn("Failed to remove context menu handler", e)
+                }
             }
-            try {
-                browserRef.getAndSet(null)?.dispose()
-            } catch (e: Exception) {
-                logger.warn("Failed to dispose browser", e)
+
+            displayHandler?.let { handler ->
+                try {
+                    client.removeDisplayHandler(handler, cefBrowser)
+                    logger.debug("Removed display handler")
+                } catch (e: Exception) {
+                    logger.warn("Failed to remove display handler", e)
+                }
+            }
+
+            loadHandler?.let { handler ->
+                try {
+                    client.removeLoadHandler(handler, cefBrowser)
+                    logger.debug("Removed load handler")
+                } catch (e: Exception) {
+                    logger.warn("Failed to remove load handler", e)
+                }
+            }
+
+            keyboardHandler?.let { handler ->
+                try {
+                    client.removeKeyboardHandler(handler, cefBrowser)
+                    logger.debug("Removed keyboard handler")
+                } catch (e: Exception) {
+                    logger.warn("Failed to remove keyboard handler", e)
+                }
             }
         }
+
+        // Clear handler references to break reference cycles
+        contextMenuHandler = null
+        displayHandler = null
+        loadHandler = null
+        keyboardHandler = null
+
+        // 8. Clear JS query reference
+        // Note: Actual disposal is handled automatically by Disposer hierarchy
+        // (Editor → Browser → JSQuery) registered in createBrowserAndLoad()
+        jsQueryFromJs = null
+
+        // 9. Browser disposal is handled automatically by Disposer hierarchy
+        // registered via Disposer.register(this, browser) in createBrowserAndLoad()
+        // No manual dispose() call needed - Disposer ensures proper cleanup order
+
+        logger.info("KogitoEditor disposed for ${file.name}")
     }
 
     // === Save Operations ===
@@ -1370,6 +1547,12 @@ class KogitoEditor(
      * @see WriteCommandAction
      */
     fun saveContent(): CompletableFuture<Boolean> {
+        // Check if editor is disposed - prevents race condition with dispose()
+        if (disposed.get()) {
+            logger.debug("Editor is disposed, skipping save")
+            return CompletableFuture.completedFuture(false)
+        }
+
         // Check if project is disposed
         if (project.isDisposed) {
             logger.debug("Project is disposed, skipping save")
@@ -1413,6 +1596,15 @@ class KogitoEditor(
                 // but WriteCommandAction needs EDT. Using invokeLater avoids blocking.
                 ApplicationManager.getApplication().invokeLater {
                     try {
+                        // Check if editor is disposed - browser may have been disposed
+                        // while we were waiting for JS response
+                        if (disposed.get()) {
+                            logger.debug("Editor disposed during save, skipping post-save operations")
+                            future.complete(false)
+                            saveInProgress.set(false)
+                            return@invokeLater
+                        }
+
                         // Check if project is disposed before writing
                         if (project.isDisposed) {
                             logger.debug("Project disposed before save completed, skipping write")
@@ -1420,16 +1612,19 @@ class KogitoEditor(
                             saveInProgress.set(false)
                             return@invokeLater
                         }
+
                         WriteCommandAction.runWriteCommandAction(project) {
                             file.setBinaryContent(xml.toByteArray(Charsets.UTF_8))
                         }
                         setModified(false)
                         future.complete(true)
 
-                        // Call markAsSaved() to reset editor state and fire content change callbacks
-                        browser.cefBrowser.executeJavaScript(
+                        // Call markAsSaved() - use browserRef to get current browser reference
+                        // in case the original was disposed and re-created (unlikely but safe)
+                        val currentBrowser = browserRef.get()
+                        currentBrowser?.cefBrowser?.executeJavaScript(
                             "window.app && window.app.markAsSaved && window.app.markAsSaved()",
-                            browser.cefBrowser.url, 0
+                            currentBrowser.cefBrowser.url, 0
                         )
                     } catch (e: Exception) {
                         logger.error("Save error", e)
