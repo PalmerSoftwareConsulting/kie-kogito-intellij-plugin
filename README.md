@@ -5,6 +5,8 @@ An IntelliJ IDEA plugin that integrates Kogito's standalone BPMN and DMN editors
 <!-- Plugin description -->
 The Kogito IntelliJ Plugin brings powerful visual editing capabilities for Business Process Model and Notation (BPMN) and Decision Model and Notation (DMN) files directly into IntelliJ IDEA. Built on Kogito's standalone editors, this plugin provides a seamless integration that allows developers to design, edit, and visualize business processes and decision models without leaving their IDE.
 
+<img src="https://raw.githubusercontent.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/main/docs/images/bpmn-dmn.gif" alt="BPMN and DMN editors in IntelliJ IDEA" width="700"/>
+
 **Key Features:**
 - Visual BPMN 2.0 editor with full modeling capabilities
 - DMN 1.2+ decision table and expression editor
@@ -17,6 +19,25 @@ The Kogito IntelliJ Plugin brings powerful visual editing capabilities for Busin
 **Supported File Types:**
 - `.bpmn` and `.bpmn2` - BPMN process diagrams
 - `.dmn` - DMN decision models
+
+### BPMN Editor
+
+Design and edit business process diagrams with drag-and-drop support, including tasks, gateways, events, and subprocesses.
+
+<img src="https://raw.githubusercontent.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/main/docs/images/bpmn-screenshot.png" alt="BPMN process diagram editor" width="700"/>
+
+### DMN Editor
+
+Create and manage decision models with a visual DRD editor, decision tables, and data type definitions.
+
+<img src="https://raw.githubusercontent.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/main/docs/images/dmn-screenshot-1.png" alt="DMN Decision Requirements Diagram" width="700"/>
+
+<img src="https://raw.githubusercontent.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/main/docs/images/dmn-screenshot-2.png" alt="DMN decision table editor" width="700"/>
+
+<img src="https://raw.githubusercontent.com/PalmerSoftwareConsulting/kie-kogito-intellij-plugin/main/docs/images/dmn-screenshot-3.png" alt="DMN data types editor" width="700"/>
+
+Built on the open-source <a href="https://github.com/apache/incubator-kie-tools">Kogito Standalone Editors</a> by Apache KIE.
+
 <!-- Plugin description end -->
 
 ## License
