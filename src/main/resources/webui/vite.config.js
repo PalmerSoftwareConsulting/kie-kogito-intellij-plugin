@@ -10,10 +10,10 @@ export default defineConfig({
         emptyOutDir: true,
         target: "es2020",     // safe for current JCEF Chromium
         sourcemap: false,
+        codeSplitting: false, // single self-contained bundle for JCEF
         rollupOptions: {
             input: resolve(__dirname, "src/index.html"),
             output: {
-                inlineDynamicImports: true, // makes "standalone" even more self-contained
                 // Disable hash for predictable filenames
                 entryFileNames: 'assets/[name].js',
                 chunkFileNames: 'assets/[name].js',

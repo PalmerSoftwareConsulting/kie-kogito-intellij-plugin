@@ -284,9 +284,9 @@ if (editorType === "dmn") {
         initialFileNormalizedPosixPathRelativeToTheWorkspaceRoot: filePathFromRoot,
         readOnly,
         origin: ORIGIN,
-        onError: (e) => {
-            console.error("[Kogito] DMN ERROR:", e);
-            alert("DMN Editor Error: " + JSON.stringify(e));
+        onError: () => {
+            console.error("[Kogito] DMN ERROR");
+            alert("DMN Editor Error");
         },
         resources: buildResourcesMap(),
     });
@@ -343,43 +343,21 @@ if (editorType === "dmn") {
     }
 
     /**
-     * Resource content handler for BPMN editor.
-     *
-     * BPMN editors may request additional resources (Work Item Definitions, etc.).
-     * This handler returns empty content for missing resources to suppress errors
-     * while still allowing the editor to function normally.
-     *
-     * For a full implementation, this could:
-     * - Fetch resources from project directory
-     * - Cache resources for performance
-     * - Report missing critical resources to user
-     *
-     * @param path The resource path being requested
-     * @returns Promise resolving to resource content (empty for now)
-     */
-    const resourceContentHandler = (path: string) => {
-        // Return empty promise for missing resources to suppress errors
-        return Promise.resolve({ content: "", path });
-    };
-
-    /**
      * BPMN editor instance created by BpmnEditor.open().
      *
      * Configuration similar to DMN editor but with BPMN-specific features:
      * - resources: Map of .wid (Work Item Definition) files for custom tasks
-     * - resourceContentHandler: Fallback handler for dynamically requested resources
      */
     const bpmn = BpmnEditor.open({
         container: bpmnContainer,
         initialContent,
         readOnly,
         origin: ORIGIN,
-        onError: (e) => {
-            console.error("[Kogito] BPMN ERROR:", e);
-            alert("BPMN Editor Error: " + JSON.stringify(e));
+        onError: () => {
+            console.error("[Kogito] BPMN ERROR");
+            alert("BPMN Editor Error");
         },
         resources: buildResourcesMap(),
-        resourceContentHandler,
     });
 
     // Subscribe to content changes to track dirty state

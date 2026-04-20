@@ -6,11 +6,11 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@kie-tools/kie-editors-standalone": "^10.1.0",
-    "@kie-tools/dmn-editor-standalone": "^10.1.0"
+    "@kie-tools/dmn-editor-standalone": "^10.1.0",
+    "@kie-tools/kie-editors-standalone": "^10.1.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.3",
-    "vite": "^7.0.0"
+    "typescript": "^6.0.3",
+    "vite": "^8.0.9"
   }
 }

@@ -49,6 +49,9 @@ jobs:
       - name: Build Plugin
         run: ./gradlew buildPlugin
 
+      - name: Verify Plugin
+        run: ./gradlew verifyPlugin
+
       # Get plugin version from gradle.properties
       - name: Get Plugin Version
         id: version

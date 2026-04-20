@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-04-20
+
+### Fixed
+- **Plugin Archive Extraction Error**: Fixed JetBrains Marketplace validation rejecting the plugin with "The plugin archive file cannot be extracted"
+  - Root cause: `node_modules` (156 MB, 104K+ files) was being packaged inside the plugin JAR
+  - Added `sourceSets` resource exclusions to only include the Vite-built `webui/dist/` output
+  - Plugin ZIP reduced from 191 MB to 9.5 MB
+- **Deprecated API Usage**: Replaced deprecated `ReadAction.compute()` calls with `ReadAction.nonBlocking().executeSynchronously()`
+  - Aligns with IntelliJ Platform 2026.1 threading model changes
+  - Fixes 3 deprecated API warnings flagged by plugin verifier
+- **Noisy Error Logs**: Kogito internal "WORKAROUND APPLIED" messages no longer logged as errors
+  - Downgraded to INFO level since they are expected namespace fixups, not actual errors
+
+### Changed
+- Updated IntelliJ Platform Gradle Plugin from 2.9.0 to 2.14.0
+- Updated Vite from 7.2.6 to 8.0.9
+- Updated TypeScript from 5.9.3 to 6.0.3
+- Replaced deprecated `inlineDynamicImports` Vite option with `codeSplitting: false`
+- Added `verifyPlugin` step to CI workflow for full plugin verification against 5 IDE versions
+
 ## [0.0.7] - 2025-12-12
 
 ### Fixed

@@ -394,9 +394,13 @@ class KogitoEditor(
 
                     // Log with appropriate level and include source information
                     val logMessage = "[JS Console][$levelStr] $message (${source}:${line})"
-                    when (level) {
-                        CefSettings.LogSeverity.LOGSEVERITY_ERROR -> logger.error(logMessage)
-                        CefSettings.LogSeverity.LOGSEVERITY_WARNING -> logger.warn(logMessage)
+
+                    // Downgrade Kogito internal workaround messages from error to info
+                    val isKogitoWorkaround = message.contains("WORKAROUND APPLIED")
+                    when {
+                        isKogitoWorkaround -> logger.info(logMessage)
+                        level == CefSettings.LogSeverity.LOGSEVERITY_ERROR -> logger.error(logMessage)
+                        level == CefSettings.LogSeverity.LOGSEVERITY_WARNING -> logger.warn(logMessage)
                         else -> logger.info(logMessage)
                     }
 
@@ -753,9 +757,9 @@ class KogitoEditor(
                     }
 
                     // Read content with proper read action for thread safety
-                    val contentBytes = ReadAction.compute<ByteArray, Exception> {
+                    val contentBytes = ReadAction.nonBlocking<ByteArray> {
                         virtualFile.contentsToByteArray()
-                    }
+                    }.executeSynchronously()
 
                     // Validate UTF-8 content
                     val contentString = String(contentBytes, Charsets.UTF_8)
@@ -814,7 +818,7 @@ class KogitoEditor(
      * @return List of VirtualFiles matching the resource criteria
      */
     private fun findResourceFiles(rootDir: VirtualFile, extensions: Set<String>): List<VirtualFile> {
-        return ReadAction.compute<List<VirtualFile>, Exception> {
+        return ReadAction.nonBlocking<List<VirtualFile>> {
             val result = mutableListOf<VirtualFile>()
             val stack = ArrayDeque<VirtualFile>()
             stack.add(rootDir)
@@ -837,7 +841,7 @@ class KogitoEditor(
             }
 
             result
-        }
+        }.executeSynchronously()
     }
 
     /**
@@ -1103,9 +1107,9 @@ class KogitoEditor(
     private fun loadInitialFileContent(browser: JBCefBrowser) {
         try {
             logger.debug("Loading initial file content: ${file.name} (${file.length} bytes)")
-            val content = ReadAction.compute<String, Exception> {
+            val content = ReadAction.nonBlocking<String> {
                 String(file.contentsToByteArray(), Charsets.UTF_8)
-            }
+            }.executeSynchronously()
             logger.debug("File content read: ${content.length} characters")
 
             // Use Base64 encoding to avoid any escaping issues with special characters

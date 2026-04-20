@@ -21,6 +21,23 @@ kotlin {
     jvmToolchain(21)
 }
 
+// Exclude node_modules, source files, and scesim-envelope from the plugin JAR.
+// Only the Vite-built webui/dist/ output is needed at runtime.
+sourceSets {
+    main {
+        resources {
+            exclude("webui/node_modules/**")
+            exclude("webui/src/**")
+            exclude("webui/scesim-envelope/**")
+            exclude("webui/package.json")
+            exclude("webui/package-lock.json")
+            exclude("webui/vite.config.js")
+            exclude("webui/tsconfig.json")
+            exclude("webui/tsconfig.node.json")
+        }
+    }
+}
+
 // Configure project's dependencies
 repositories {
     mavenCentral()
